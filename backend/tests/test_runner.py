@@ -1,6 +1,8 @@
+import asyncio
+import sys
 from pathlib import Path
 
-from app.runner import build_command, cli_environment, estimate_usage, extract_usage, present_log_line
+from app.runner import ProcessRunner, build_command, cli_environment, estimate_usage, extract_usage, present_log_line
 
 
 def test_codex_runs_outside_the_task_directory():
@@ -119,6 +121,29 @@ def test_extract_cursor_usage_names():
 def test_extract_structured_usage():
     usage = extract_usage('log\n{"usage":{"input_tokens":12,"output_tokens":8,"cache_read_input_tokens":3}}')
     assert usage == {'input_tokens': 12, 'output_tokens': 8, 'cache_tokens': 3, 'estimated': False}
+
+
+def test_long_stream_lines_are_read_instead_of_failing(monkeypatch, tmp_path):
+    script = tmp_path / 'big_line.py'
+    script.write_text(
+        "import sys\n"
+        "sys.stdout.write('x' * 200_000 + '\\n')\n"
+        "sys.stdout.write('tail')\n",
+        encoding='utf-8',
+    )
+    monkeypatch.setattr('app.runner.build_command', lambda *args, **kwargs: [sys.executable, str(script)])
+    logged: list[str] = []
+
+    async def log(text: str) -> None:
+        logged.append(text)
+
+    result = asyncio.run(ProcessRunner(log_callback=log).run({'cli': 'custom'}, 'prompt', tmp_path, {}, 1))
+
+    assert result.exit_code == 0
+    assert result.output.startswith('x' * 200_000 + '\n')
+    assert result.output.endswith('tail')
+    assert logged[0] == 'x' * 200_000 + '\n'
+    assert logged[-1] == 'tail\n'
 
 
 def test_usage_fallback_is_marked_estimated():

@@ -58,21 +58,36 @@ class ProcessRunner:
         limited = False
         thinking = False
 
-        async def consume() -> None:
+        async def handle_line(line: bytes) -> bool:
             nonlocal limited, thinking
+            text = line.decode("utf-8", errors="replace")
+            lines.append(text)
+            visible = present_log_line(text, thinking)
+            thinking = visible.thinking
+            if self.log_callback and visible.text:
+                await self.log_callback(visible.text)
+            if RATE_LIMIT_RE.search(text) and not limited:
+                limited = True
+                if self.rate_limit_callback:
+                    await self.rate_limit_callback()
+                process.terminate()
+                return False
+            return True
+
+        async def consume() -> None:
+            # Stream the output by raw chunks: a stream-json event that carries a
+            # whole document is one line well above StreamReader's 64 KiB limit,
+            # and readline() raises instead of returning it.
             assert process.stdout is not None
-            while line := await process.stdout.readline():
-                text = line.decode("utf-8", errors="replace")
-                lines.append(text)
-                visible = present_log_line(text, thinking)
-                thinking = visible.thinking
-                if self.log_callback and visible.text:
-                    await self.log_callback(visible.text)
-                if RATE_LIMIT_RE.search(text) and not limited:
-                    limited = True
-                    if self.rate_limit_callback:
-                        await self.rate_limit_callback()
-                    process.terminate()
+            buffer = b""
+            while chunk := await process.stdout.read(65536):
+                buffer += chunk
+                while (end := buffer.find(b"\n")) >= 0:
+                    line, buffer = buffer[: end + 1], buffer[end + 1 :]
+                    if not await handle_line(line):
+                        return
+            if buffer:
+                await handle_line(buffer)
 
         consumer = asyncio.create_task(consume())
         try:
@@ -86,7 +101,13 @@ class ProcessRunner:
                 await process.wait()
             await consumer
             return RunResult(-1, "".join(lines), timed_out=True)
-        await consumer
+        try:
+            await consumer
+        except Exception:
+            if process.returncode is None:
+                process.kill()
+                await process.wait()
+            raise
         output = "".join(lines)
         usage = extract_usage(output)
         if not usage:
