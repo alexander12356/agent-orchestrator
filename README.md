@@ -47,6 +47,16 @@ zcode --model account:zai-individual-coding-plan/GLM-5.4 -p 'Reply with OK.'
 
 `zcode login --no-browser` печатает ссылку авторизации Z.ai: откройте её один раз и подтвердите доступ. Полная ссылка на модель передаётся в поле «Модель» профиля бота (`provider/model`, например `account:zai-individual-coding-plan/GLM-5.4`); если поле пустое, используется модель, сохранённая в ZCode. Промпт всегда запускается с `--mode yolo`, чтобы агент мог писать файлы без подтверждений. После обновления `zcode-app-cli` повторите скрипт: он заново подтягивает каталог моделей.
 
+DeepSeek Harness (`dsh`) ставится отдельным скриптом. Он кладёт Node.js 24 в `/usr/local/lib/nodejs/node24` (глобальный Node 22 не трогает), ставит `@deepseek-ai/dsh` и создаёт обёртки `/usr/local/bin/dsh` и `/usr/local/bin/dsh-agent`:
+
+```bash
+sudo bash scripts/install-dsh-cli.sh
+echo 'DEEPSEEK_API_KEY=sk-...' >> ~/.dsh/.env   # ключ с platform.deepseek.com
+dsh headless "Reply with OK."
+```
+
+Обёртка `dsh` читает `~/.dsh/.env` при запуске, поэтому ключ подхватывается и сервером оркестратора. Для профиля бота выберите Custom CLI, среду Server и команду `dsh-agent --model deepseek-v4-pro {prompt}` (или `deepseek-flash`): `dsh-agent` запускает `dsh headless --approval-policy never` (агент пишет файлы без подтверждений) и подставляет модель патч-оверлеем. Пустое поле «Модель» — модель профиля dsh по умолчанию (`deepseek-flash`).
+
 Поддерживаются placeholder-ы `{prompt}`, `{model}`, `{artifact_dir}`, `{task_id}`, `{stage}`. Если `{prompt}` отсутствует, промпт добавляется последним аргументом. Пример:
 
 ```bash
