@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     retry_count INTEGER NOT NULL DEFAULT 0,
     stage_agents TEXT NOT NULL DEFAULT '{}',
     worktree_path TEXT,
+    repository_url TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -100,7 +101,7 @@ def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
-        for column in ("external_issue_key", "external_issue_url", "milestone", "sprint"):
+        for column in ("external_issue_key", "external_issue_url", "milestone", "sprint", "repository_url"):
             if column not in columns:
                 conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} TEXT")
 
@@ -136,4 +137,5 @@ def decode_task(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     result = dict(row)
     result["stage_agents"] = {int(k): int(v) for k, v in json.loads(result["stage_agents"]).items()}
     result["merged_to_main"] = bool(result["merged_to_main"])
+    result["repository_url"] = result.get("repository_url") or ""
     return result

@@ -12,6 +12,7 @@ const settings = {
   yougile_webhook_id: '',
   git_webhook_secret: '',
   worker_token: '',
+  repository_url: '',
   git_webhook_url: 'https://orchestrator.test/api/webhooks/git',
   tracker_webhook_url: 'https://orchestrator.test/api/webhooks/tracker',
   worker_websocket_url: 'wss://orchestrator.test/ws/worker',
@@ -27,7 +28,7 @@ describe('Yougile settings', () => {
     expect(await screen.findByLabelText('Yougile API Key')).toBeInTheDocument();
     expect(screen.getByLabelText('Название проекта Yougile')).toBeInTheDocument();
     expect(screen.getByLabelText('Имя доски')).toBeInTheDocument();
-    expect(screen.getByLabelText('Стикер (необязательно)')).toBeInTheDocument();
+    expect(screen.getByLabelText('Git-репозиторий по умолчанию')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Импортировать задачи' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Проверить подключение' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Создать webhook' })).toBeInTheDocument();

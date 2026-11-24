@@ -10,10 +10,24 @@ def test_agent_and_task_crud(client, agent):
     task = make_task(client, agent, title='Player controller')
     assert task['current_stage'] == 1
     assert task['branch_name'] == f"feat/task-{task['id']}"
+    assert task['repository_url'] == ''
+    response = client.put(f"/api/tasks/{task['id']}", json={'title': 'Player controller', 'description': 'Description', 'repository_url': 'https://github.com/T1mposter/zelya.git', 'stage_agents': {'1': agent['id']}})
+    assert response.status_code == 200
+    assert response.json()['repository_url'] == 'https://github.com/T1mposter/zelya.git'
     assert task['stage_agents']['1'] == agent['id']
     response = client.get('/api/tasks')
     assert response.json()[0]['title'] == 'Player controller'
     assert (settings.storage_dir / 'tasks' / str(task['id']) / '00_task.md').exists()
+
+
+def test_task_without_agent_assignment_does_not_get_default_agent(client, agent):
+    response = client.post('/api/tasks', json={'title': 'Unassigned', 'description': 'Description', 'stage_agents': {}})
+
+    assert response.status_code == 201
+    task = response.json()
+    assert task['stage_agents'] == {}
+    assert task['current_agent'] is None
+    assert task['status'] == 'queued'
 
 
 def test_dependency_cycle_is_rejected(client, agent):
@@ -23,6 +37,23 @@ def test_dependency_cycle_is_rejected(client, agent):
     response = client.put(f"/api/tasks/{first['id']}", json={'title': 'First', 'description': '', 'dependencies': [second['id']], 'stage_agents': {'1': agent['id']}})
     assert response.status_code == 400
     assert 'циклическая' in response.json()['detail']
+
+
+def test_start_open_task(client, agent, monkeypatch):
+    task = make_task(client, agent)
+    from app.database import connect
+    with connect() as conn:
+        conn.execute("UPDATE tasks SET status='open' WHERE id=?", (task['id'],))
+
+    async def start(task_id):
+        pass
+
+    monkeypatch.setattr('app.main.dispatcher.start', start)
+    response = client.post(f"/api/tasks/{task['id']}/start")
+
+    assert response.status_code == 202
+    assert client.get(f"/api/tasks/{task['id']}").json()['status'] == 'queued'
+    assert client.post(f"/api/tasks/{task['id']}/start").status_code == 409
 
 
 def test_manual_merge_unlocks_children(client, agent):

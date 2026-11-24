@@ -20,6 +20,7 @@ from .config import ROOT, settings
 from .database import connect, decode_agent, decode_task, dumps, init_db, now, transaction
 from .dispatcher import dispatcher, task_dir
 from .events import bus
+from .runner import present_log_line
 from .schemas import AgentCreate, AgentUpdate, IntegrationSettings, ManualMerge, TaskCreate, TaskUpdate, TrackerAnswer
 from .tracker import BOT_PREFIX, YougileError, ensure_webhook, fetch_import_tasks, integration_settings, test_connection
 from .worker_hub import hub
@@ -28,6 +29,7 @@ from .worker_hub import hub
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    dispatcher.recover()
     yield
     for task in list(dispatcher.pending):
         task.cancel()
@@ -59,7 +61,7 @@ def task_view(task: dict[str, Any], conn: Any) -> dict[str, Any]:
     task["dependencies"] = [dict(row) for row in dependencies]
     agent_id = task["stage_agents"].get(task["current_stage"]) if task["status"] != "open" else None
     task["current_agent"] = decode_agent(conn.execute("SELECT * FROM agents WHERE id=?", (agent_id,)).fetchone()) if agent_id else None
-    tokens = conn.execute("SELECT COALESCE(SUM(input_tokens+output_tokens), 0) AS total FROM stage_runs WHERE task_id=?", (task["id"],)).fetchone()
+    tokens = conn.execute("SELECT COALESCE(SUM(input_tokens+output_tokens+cache_tokens), 0) AS total FROM stage_runs WHERE task_id=?", (task["id"],)).fetchone()
     task["total_tokens"] = tokens["total"]
     return task
 
@@ -82,11 +84,6 @@ def validate_dependencies(conn: Any, task_id: int, dependencies: list[int]) -> N
                 continue
             seen.add(current)
             stack.extend(row[0] for row in conn.execute("SELECT depends_on_task_id FROM task_dependencies WHERE task_id=?", (current,)))
-
-
-def default_stage_agents(conn: Any) -> dict[str, int]:
-    ids = [row["id"] for row in conn.execute("SELECT id FROM agents ORDER BY id LIMIT 4")]
-    return {str(stage): ids[min(stage - 1, len(ids) - 1)] for stage in range(1, 5)} if ids else {}
 
 
 def validate_agent_assignments(conn: Any, assignments: dict[int, int]) -> None:
@@ -169,15 +166,15 @@ async def create_task(data: TaskCreate) -> dict[str, Any]:
     with transaction() as conn:
         validate_dependencies(conn, -1, data.dependencies)
         validate_agent_assignments(conn, data.stage_agents)
-        assignments = {str(k): v for k, v in data.stage_agents.items()} or default_stage_agents(conn)
+        assignments = {str(k): v for k, v in data.stage_agents.items()}
         blocked = bool(data.dependencies and conn.execute(
             f"SELECT 1 FROM tasks WHERE id IN ({','.join('?' * len(data.dependencies))}) AND merged_to_main=0 LIMIT 1",
             data.dependencies,
         ).fetchone())
         timestamp = now()
         cursor = conn.execute(
-            "INSERT INTO tasks(title, description, external_issue_id, milestone, sprint, current_stage, status, branch_name, stage_agents, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (data.title, data.description, data.external_issue_id, data.milestone, data.sprint, 0 if blocked else 1, "blocked_main" if blocked else "queued", "pending", dumps(assignments), timestamp, timestamp),
+            "INSERT INTO tasks(title, description, external_issue_id, milestone, sprint, repository_url, current_stage, status, branch_name, stage_agents, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (data.title, data.description, data.external_issue_id, data.milestone, data.sprint, data.repository_url.strip(), 0 if blocked else 1, "blocked_main" if blocked else "queued", "pending", dumps(assignments), timestamp, timestamp),
         )
         task_id = cursor.lastrowid
         conn.execute("UPDATE tasks SET branch_name=? WHERE id=?", (f"feat/task-{task_id}", task_id))
@@ -208,8 +205,8 @@ def update_task(task_id: int, data: TaskUpdate) -> dict[str, Any]:
         validate_agent_assignments(conn, data.stage_agents)
         assignments = {str(k): v for k, v in data.stage_agents.items()}
         conn.execute(
-            "UPDATE tasks SET title=?, description=?, external_issue_id=?, milestone=?, sprint=?, stage_agents=?, updated_at=? WHERE id=?",
-            (data.title, data.description, data.external_issue_id, data.milestone, data.sprint, dumps(assignments), now(), task_id),
+            "UPDATE tasks SET title=?, description=?, external_issue_id=?, milestone=?, sprint=?, repository_url=?, stage_agents=?, updated_at=? WHERE id=?",
+            (data.title, data.description, data.external_issue_id, data.milestone, data.sprint, data.repository_url.strip(), dumps(assignments), now(), task_id),
         )
         conn.execute("DELETE FROM task_dependencies WHERE task_id=?", (task_id,))
         for dependency in data.dependencies:
@@ -251,6 +248,16 @@ def artifact(task_id: int, name: str) -> PlainTextResponse:
 async def answer(task_id: int, data: TrackerAnswer) -> dict[str, bool]:
     try:
         await dispatcher.answer(task_id, data.answer)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+    return {"ok": True}
+
+
+@app.post("/api/tasks/{task_id}/start", status_code=202)
+async def start_open(task_id: int) -> dict[str, bool]:
+    get_task(task_id)
+    try:
+        await dispatcher.start_open(task_id)
     except ValueError as exc:
         raise HTTPException(409, str(exc))
     return {"ok": True}
@@ -350,6 +357,7 @@ async def import_yougile_tasks() -> dict[str, int]:
         raise HTTPException(502, str(exc))
     imported = updated = skipped = 0
     team_url = (saved.get("yougile_team_url") or IntegrationSettings().yougile_team_url).rstrip("/")
+    repository = saved.get("repository_url", "").strip()
     for item in items:
         issue_url = f"{team_url}/#{item['key']}" if item.get("key") else ""
         with transaction() as conn:
@@ -360,12 +368,15 @@ async def import_yougile_tasks() -> dict[str, int]:
                 continue
             if existing:
                 task_id = existing["id"]
-                conn.execute("UPDATE tasks SET title=?, description=?, external_issue_key=?, external_issue_url=?, updated_at=? WHERE id=?", (item["title"], item["description"], item.get("key", ""), issue_url, timestamp, task_id))
+                conn.execute(
+                    "UPDATE tasks SET title=?, description=?, external_issue_key=?, external_issue_url=?, repository_url=CASE WHEN repository_url IS NULL OR repository_url='' THEN ? ELSE repository_url END, updated_at=? WHERE id=?",
+                    (item["title"], item["description"], item.get("key", ""), issue_url, repository, timestamp, task_id),
+                )
                 updated += 1
             else:
                 cursor = conn.execute(
-                    "INSERT INTO tasks(title, description, external_issue_id, external_issue_key, external_issue_url, current_stage, status, branch_name, stage_agents, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, 'open', 'pending', ?, ?, ?)",
-                    (item["title"], item["description"], item["id"], item.get("key", ""), issue_url, dumps(default_stage_agents(conn)), timestamp, timestamp),
+                    "INSERT INTO tasks(title, description, external_issue_id, external_issue_key, external_issue_url, repository_url, current_stage, status, branch_name, stage_agents, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 1, 'open', 'pending', ?, ?, ?)",
+                    (item["title"], item["description"], item["id"], item.get("key", ""), issue_url, repository, dumps({}), timestamp, timestamp),
                 )
                 task_id = cursor.lastrowid
                 conn.execute("UPDATE tasks SET branch_name=? WHERE id=?", (f"feat/task-{task_id}", task_id))
@@ -461,7 +472,9 @@ async def worker_socket(websocket: WebSocket, authorization: str | None = Header
             message = await websocket.receive_json()
             kind = message.get("type")
             if kind == "LOG_CHUNK":
-                await bus.publish(int(message["task_id"]), 3, str(message.get("chunk", "")))
+                visible = present_log_line(str(message.get("chunk", "")))
+                if visible.text:
+                    await bus.publish(int(message["task_id"]), 3, visible.text)
             elif kind == "TASK_COMPLETED":
                 await dispatcher.worker_completed(message)
             elif kind == "TASK_FAILED":

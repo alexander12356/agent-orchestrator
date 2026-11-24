@@ -1,7 +1,7 @@
 import { Background, Controls, Edge, Handle, MarkerType, Node, NodeProps, Position, ReactFlow } from '@xyflow/react';
 import { Bot, CheckCircle2, FileCode2, Flame, GitPullRequest, RotateCcw, UserRound } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { fmtTokens, stageName } from './api';
+import { fmtTokens, spentTokens, stageName } from './api';
 import { edgeArtifact } from './graphUtils';
 import { Avatar, Empty } from './components';
 import ArtifactEdge from './ArtifactEdge';
@@ -40,7 +40,7 @@ export default function Graph({ task, tasks, agents, reload, selectTask, notify 
   const nodes: Node[] = useMemo(() => titles.map((title, index) => {
     const stage = index + 1;
     const stageRuns = runs.filter(r => r.stage === stage);
-    return { id: String(stage), type: 'stage', selected: stage === selectedStage, position: { x: index * 340, y: index % 2 ? 150 : 90 }, data: { title, env: envs[index], agent: agents.find(a => a.id === task.stage_agents[stage]), active: task.current_stage === stage && ['running', 'waiting_answer'].includes(task.status), done: task.current_stage > stage, status: task.current_stage === stage ? task.status : '', tokens: stageRuns.reduce((sum, r) => sum + r.input_tokens + r.output_tokens, 0), fallback: stageRuns.some(r => r.is_fallback), human: stage === 5 } };
+    return { id: String(stage), type: 'stage', selected: stage === selectedStage, position: { x: index * 340, y: index % 2 ? 150 : 90 }, data: { title, env: envs[index], agent: agents.find(a => a.id === task.stage_agents[stage]), active: task.current_stage === stage && ['running', 'waiting_answer'].includes(task.status), done: task.current_stage > stage, status: task.current_stage === stage ? task.status : '', tokens: stageRuns.reduce((sum, r) => sum + spentTokens(r), 0), fallback: stageRuns.some(r => r.is_fallback), human: stage === 5 } };
   }), [task, runs, agents, selectedStage]);
   const latest = (stage: number) => runs.filter(r => r.stage === stage && r.status === 'completed').at(-1);
   const openArtifactEdge = useCallback((id: string, source: number, target: number) => {
@@ -54,7 +54,7 @@ export default function Graph({ task, tasks, agents, reload, selectTask, notify 
     for (let i = 1; i <= 4; i++) {
       const docRun = latest(i);
       let label = ['Тех. документация', 'Дока утверждена', 'Git Diff + Отчёт', `Ветка ${task.branch_name}`][i - 1];
-      if (docRun) label += ` • ${fmtTokens(docRun.input_tokens + docRun.output_tokens)} tok`;
+      if (docRun) label += ` • ${fmtTokens(spentTokens(docRun))} tok`;
       result.push({ id: `${i}-${i + 1}`, type: 'artifact', data: { onOpen: () => openArtifactEdge(`${i}-${i + 1}`, i, i + 1) }, selected: selectedEdge === `${i}-${i + 1}`, source: String(i), target: String(i + 1), label, animated: task.current_stage === i + 1 && task.status === 'running', style: { stroke: task.current_stage > i ? '#6574ee' : '#33415c', strokeWidth: 1.5 }, labelStyle: { fill: '#aebad1', fontSize: 10 }, labelBgStyle: { fill: '#121c30', fillOpacity: 1 }, labelBgPadding: [7, 5] as [number, number], markerEnd: { type: MarkerType.ArrowClosed, color: task.current_stage > i ? '#6574ee' : '#33415c' } });
     }
     const reviews2 = runs.filter(r => r.stage === 2 && r.status === 'completed');

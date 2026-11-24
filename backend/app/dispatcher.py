@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import json
 from pathlib import Path
 from typing import Any
@@ -7,7 +8,8 @@ from .config import settings
 from .database import connect, decode_agent, decode_task, now, transaction
 from .events import bus
 from .runner import ProcessRunner
-from .tracker import publish_questions
+from .repo import RepoError, export_task_files, prepare_checkout, repository_url
+from .tracker import integration_settings, publish_questions
 from .worker_hub import hub
 
 
@@ -34,7 +36,18 @@ class Dispatcher:
     def __init__(self) -> None:
         self.active: dict[int, int] = {}
         self.pending: set[asyncio.Task[Any]] = set()
+        self.runs: dict[int, asyncio.Task[Any]] = {}
+        self.processes: dict[int, asyncio.subprocess.Process] = {}
+        self.stop_requested: set[int] = set()
         self.lock = asyncio.Lock()
+
+    def recover(self) -> None:
+        with connect() as conn:
+            conn.execute(
+                "UPDATE stage_runs SET status='error', error=?, finished_at=? WHERE status='running'",
+                ("Сессия прервана: сервер был перезапущен", now()),
+            )
+            conn.execute("UPDATE tasks SET status='queued', updated_at=? WHERE status='running'", (now(),))
 
     def spawn(self, coroutine: Any) -> None:
         task = asyncio.create_task(coroutine)
@@ -79,6 +92,7 @@ class Dispatcher:
 
     async def run_stage(self, task_id: int, stage: int) -> None:
         run_id: int | None = None
+        self.runs[task_id] = asyncio.current_task()
         try:
             with transaction() as conn:
                 task = decode_task(conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone())
@@ -97,27 +111,53 @@ class Dispatcher:
                 conn.execute("UPDATE tasks SET status='running', current_stage=?, updated_at=? WHERE id=?", (stage, started, task_id))
             directory = task_dir(task_id)
             await bus.publish(task_id, stage, f"Этап {stage}, попытка {attempt}: запуск {agent['name']}\n")
+            if task_id in self.stop_requested:
+                return
             if stage == 3:
                 await self._run_worker(task, agent, attempt, run_id)
             else:
                 await self._run_server(task, agent, stage, attempt, run_id, directory)
+        except asyncio.CancelledError:
+            self._mark_stopped(run_id)
+            raise
         except Exception as exc:
-            if run_id:
+            if task_id in self.stop_requested:
+                self._mark_stopped(run_id)
+            elif run_id:
                 with connect() as conn:
                     conn.execute(
                         "UPDATE stage_runs SET status='error', error=?, finished_at=? WHERE id=?",
                         (str(exc), now(), run_id),
                     )
                     conn.execute("UPDATE tasks SET status='error', updated_at=? WHERE id=?", (now(), task_id))
-            await bus.publish(task_id, stage, f"Ошибка: {exc}\n")
+                await bus.publish(task_id, stage, f"Ошибка: {exc}\n")
         finally:
             self.active.pop(task_id, None)
-            await self.schedule()
+            self.processes.pop(task_id, None)
+            self.runs.pop(task_id, None)
+            if task_id not in self.stop_requested:
+                await self.schedule()
 
-    def _prompt(self, task: dict[str, Any], agent: dict[str, Any], stage: int, attempt: int) -> str:
+    def _mark_stopped(self, run_id: int | None) -> None:
+        if not run_id:
+            return
+        with connect() as conn:
+            conn.execute(
+                "UPDATE stage_runs SET status='error', error=?, finished_at=? WHERE id=? AND status='running'",
+                ("Остановлено перезапуском", now(), run_id),
+            )
+
+    def _prompt(self, task: dict[str, Any], agent: dict[str, Any], stage: int, attempt: int, evidence: list[str] | None = None, missing: list[str] | None = None, repository_ref: str = "") -> str:
         directory = task_dir(task["id"])
         artifact = directory / STAGE_FILES[stage].format(attempt=attempt)
         inputs = [f"ТЗ: {directory / '00_task.md'}"]
+        if evidence is not None:
+            lines = [f"Файлы репозитория, ветка {repository_ref}, лежат в {directory / 'repo'}:"]
+            lines.extend(f"- {directory / 'repo' / name}" for name in evidence)
+            if missing:
+                lines.append("В снимке нет: " + ", ".join(missing))
+            lines.append("Прочитай только ТЗ, чат задачи, перечисленные файлы и явно указанные замечания или ответы. Не открывай GitHub, другие каталоги сервера, чужие задачи и базу. Если файла нет, запиши это в результат и не выдумывай имена.")
+            inputs.append("\n".join(lines))
         if stage == 1:
             previous_reviews = sorted(directory.glob("02_doc_review_v*.json"))
             answers = sorted(directory.glob("01_answers_v*.md"))
@@ -141,7 +181,6 @@ class Dispatcher:
         )
 
     async def _run_server(self, task: dict[str, Any], agent: dict[str, Any], stage: int, attempt: int, run_id: int, directory: Path) -> None:
-        prompt = self._prompt(task, agent, stage, attempt)
         log_path = directory / "logs" / f"stage_{stage}_attempt_{attempt}.log"
 
         async def log(text: str) -> None:
@@ -149,14 +188,44 @@ class Dispatcher:
                 file.write(text)
             await bus.publish(task["id"], stage, text)
 
+        url = repository_url(task, integration_settings().get("repository_url", ""))
+        await log("Читаю удаленный репозиторий задачи…\n" if url else "Агент запущен\n")
+        evidence: list[str] | None = None
+        missing: list[str] = []
+        repository_ref = ""
+        if url and task["id"] not in self.stop_requested:
+            try:
+                repository, repository_ref = await asyncio.to_thread(prepare_checkout, url, task["id"], task["branch_name"], task.get("external_issue_id") or "")
+                source = "\n".join(filter(None, [
+                    task.get("title"),
+                    task.get("description"),
+                    task.get("external_issue_key"),
+                    read_artifact(task["id"], "00_task.md"),
+                    read_artifact(task["id"], "00_yougile_chat.md"),
+                ]))
+                evidence, missing = await asyncio.to_thread(export_task_files, repository, directory / "repo", source)
+            except RepoError as exc:
+                await log(f"Репозиторий задачи недоступен: {exc}\n")
+                raise
+            await log(f"Снимок ветки {repository_ref}. В выдачу: {', '.join(evidence) or 'ничего'}\n")
+            if missing:
+                await log(f"В снимке нет: {', '.join(missing)}\n")
+        if task["id"] in self.stop_requested:
+            return
+        if url:
+            await log("Агент запущен\n")
+        prompt = self._prompt(task, agent, stage, attempt, evidence, missing, repository_ref)
+
         result = None
         configs = [agent["primary_config"], *agent["fallback_configs"]]
         for index, config in enumerate(configs):
+            if task["id"] in self.stop_requested:
+                return
             if config.get("environment") == "worker":
                 raise RuntimeError("Серверный этап не может выполняться на Local Worker")
             if index:
                 await log(f"Fallback: {config['cli']} {config.get('model', '')}\n")
-            runner = ProcessRunner(log_callback=log)
+            runner = ProcessRunner(log_callback=log, on_process=lambda process, task_id=task["id"]: self.processes.__setitem__(task_id, process))
             result = await runner.run(
                 config,
                 prompt,
@@ -164,6 +233,9 @@ class Dispatcher:
                 {"ORCHESTRATOR_TASK_ID": str(task["id"]), "ORCHESTRATOR_STAGE": str(stage)},
                 agent["fallback_triggers"].get("timeout_minutes", 20),
             )
+            if task["id"] in self.stop_requested:
+                self._mark_stopped(run_id)
+                return
             triggers = agent["fallback_triggers"]
             retry = (
                 (result.rate_limited and triggers.get("rate_limit", True))
@@ -233,6 +305,10 @@ class Dispatcher:
     async def worker_completed(self, message: dict[str, Any]) -> None:
         task_id = int(message["task_id"])
         run_id = int(message["run_id"])
+        with connect() as conn:
+            run = conn.execute("SELECT status FROM stage_runs WHERE id=?", (run_id,)).fetchone()
+        if not run or run["status"] != "running":
+            return
         report = str(message.get("report", ""))
         with transaction() as conn:
             run = conn.execute("SELECT * FROM stage_runs WHERE id=?", (run_id,)).fetchone()
@@ -249,8 +325,11 @@ class Dispatcher:
 
     async def worker_failed(self, message: dict[str, Any]) -> None:
         task_id, run_id = int(message["task_id"]), int(message["run_id"])
-        error = str(message.get("error", "Worker failed"))
         with connect() as conn:
+            run = conn.execute("SELECT status FROM stage_runs WHERE id=?", (run_id,)).fetchone()
+            if not run or run["status"] != "running":
+                return
+            error = str(message.get("error", "Worker failed"))
             conn.execute("UPDATE stage_runs SET status='error', error=?, finished_at=? WHERE id=?", (error, now(), run_id))
             conn.execute("UPDATE tasks SET status='error', updated_at=? WHERE id=?", (now(), task_id))
         self.active.pop(task_id, None)
@@ -266,14 +345,55 @@ class Dispatcher:
             conn.execute("UPDATE tasks SET status='queued', updated_at=? WHERE id=?", (now(), task_id))
         await self.start(task_id)
 
+    async def start_open(self, task_id: int) -> None:
+        with connect() as conn:
+            cursor = conn.execute(
+                "UPDATE tasks SET status='queued', current_stage=1, updated_at=? WHERE id=? AND status='open'",
+                (now(), task_id),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError("Задача не находится в статусе Open")
+        await self.start(task_id)
+
     async def restart(self, task_id: int, stage: int) -> None:
+        self.stop_requested.add(task_id)
+        await self._stop_run(task_id)
+        if stage == 3:
+            await hub.send({"type": "CANCEL_TASK", "task_id": task_id})
         with connect() as conn:
             task = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
             if not task or task["status"] == "open":
+                self.stop_requested.discard(task_id)
                 return
+            conn.execute(
+                "UPDATE stage_runs SET status='error', error=?, finished_at=? WHERE task_id=? AND status='running'",
+                ("Остановлено перезапуском", now(), task_id),
+            )
             conn.execute("UPDATE tasks SET current_stage=?, status='queued', retry_count=retry_count+1, updated_at=? WHERE id=? AND merged_to_main=0", (stage, now(), task_id))
         self.active.pop(task_id, None)
+        self.stop_requested.discard(task_id)
+        await bus.publish(task_id, stage, "Сессия остановлена. Запускается новая попытка.\n")
         await self.start(task_id)
+
+    async def _stop_run(self, task_id: int) -> None:
+        process = self.processes.get(task_id)
+        if process and process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=5)
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+        job = self.runs.get(task_id)
+        if job and not job.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(job), timeout=8)
+            except TimeoutError:
+                job.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await job
+            except (asyncio.CancelledError, Exception):
+                pass
 
     async def force_approve(self, task_id: int, stage: int) -> None:
         if stage not in (1, 2, 4):

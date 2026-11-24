@@ -12,4 +12,8 @@ storage/avatars/*
 storage/tasks/*
 !storage/avatars/.gitkeep
 !storage/tasks/.gitkeep
+storage/mirrors/
+storage/checkouts/
+storage/git-credential-helper
+
 *.log

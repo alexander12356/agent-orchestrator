@@ -50,6 +50,7 @@ class TaskBase(BaseModel):
     external_issue_id: str | None = None
     milestone: str = ""
     sprint: str = ""
+    repository_url: str = ""
     dependencies: list[int] = []
     stage_agents: dict[int, int] = {}
 
@@ -80,3 +81,4 @@ class IntegrationSettings(BaseModel):
     yougile_webhook_id: str = ""
     git_webhook_secret: str = ""
     worker_token: str = ""
+    repository_url: str = ""

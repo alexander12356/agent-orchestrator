@@ -42,5 +42,7 @@ label { display: grid; gap: 7px; font-size: 12px; color: #98a6bf; }
 .markdown { font-size: 13px; line-height: 1.65; color: #bac6db; }
 .markdown h1, .markdown h2, .markdown h3 { color: #edf2ff; margin: 16px 0 8px; }
 .markdown pre { background: #080e1b; padding: 12px; border-radius: 8px; overflow: auto; }
+.mermaid-diagram { margin: 12px 0; overflow-x: auto; }
+.mermaid-diagram svg { max-width: 100%; height: auto; }
 .markdown code { color: #a5b4fc; }
 .markdown p { margin: 8px 0; }

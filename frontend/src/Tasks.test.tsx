@@ -1,7 +1,7 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import Tasks from './Tasks';
-import { Task } from './types';
+import { Agent, Task } from './types';
 
 const task: Task = {
   id: 7,
@@ -22,7 +22,18 @@ const task: Task = {
   created_at: '2026-01-01T00:00:00Z',
 };
 
-afterEach(() => vi.unstubAllGlobals());
+const architect: Agent = {
+  id: 1,
+  name: 'Архитектор',
+  avatar_url: '🏛️',
+  role_prompt: '',
+  concurrency_limit: 1,
+  primary_config: { cli: 'custom', model: 'grok-4.7-high', environment: 'server' },
+  fallback_configs: [],
+  fallback_triggers: { rate_limit: true, exit_code: true, timeout: true, timeout_minutes: 20 },
+};
+
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('Task deletion', () => {
   it('confirms and deletes a task', async () => {
@@ -42,5 +53,38 @@ describe('Task deletion', () => {
 
     await waitFor(() => expect(onDeleted).toHaveBeenCalledWith(7));
     expect(fetchMock).toHaveBeenCalledWith('/api/tasks/7', expect.objectContaining({ method: 'DELETE' }));
+  });
+});
+
+describe('Task start', () => {
+  it('starts the pipeline for an open task', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 202 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const reload = vi.fn();
+    render(<Tasks tasks={[task]} agents={[architect]} reload={reload} openTask={vi.fn()} onDeleted={vi.fn()} notify={vi.fn()}/>);
+
+    fireEvent.click(screen.getByTitle('Запустить пайплайн'));
+
+    await waitFor(() => expect(reload).toHaveBeenCalled());
+    expect(fetchMock).toHaveBeenCalledWith('/api/tasks/7/start', expect.objectContaining({ method: 'POST' }));
+  });
+});
+
+describe('Bot assignment', () => {
+  it('saves an empty assignment instead of a default agent', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(task), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<Tasks tasks={[task]} agents={[architect]} reload={vi.fn()} openTask={vi.fn()} onDeleted={vi.fn()} notify={vi.fn()}/>);
+
+    fireEvent.click(screen.getByTitle('Редактировать'));
+    const stage = screen.getByRole('combobox', { name: 'Этап 1' });
+    fireEvent.change(stage, { target: { value: '1' } });
+    fireEvent.change(stage, { target: { value: '' } });
+    expect(stage).toHaveValue('');
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить задачу' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
+    expect(body.stage_agents).toEqual({});
   });
 });

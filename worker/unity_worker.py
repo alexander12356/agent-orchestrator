@@ -26,6 +26,8 @@ class UnityWorker:
         self.unity = args.unity
         self.websocket: Any = None
         self.stopping = False
+        self.jobs: dict[int, asyncio.Task[Any]] = {}
+        self.processes: dict[int, asyncio.subprocess.Process] = {}
 
     async def send(self, message: dict[str, Any]) -> None:
         if self.websocket:
@@ -140,6 +142,7 @@ class UnityWorker:
         process = await asyncio.create_subprocess_exec(
             *self.command(config, prompt, path), cwd=path, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
         )
+        self.processes[task_id] = process
         lines: list[str] = []
         limited = False
 
@@ -155,14 +158,21 @@ class UnityWorker:
                     process.terminate()
 
         consumer = asyncio.create_task(consume())
+        timed_out = False
         try:
-            await asyncio.wait_for(process.wait(), timeout * 60)
-            timed_out = False
-        except TimeoutError:
-            timed_out = True
-            process.terminate()
-            await process.wait()
-        await consumer
+            try:
+                await asyncio.wait_for(process.wait(), timeout * 60)
+            except TimeoutError:
+                timed_out = True
+                process.terminate()
+                await process.wait()
+            await consumer
+        finally:
+            if process.returncode is None:
+                process.terminate()
+            if not consumer.done():
+                consumer.cancel()
+            self.processes.pop(task_id, None)
         output = "".join(lines)
         usage = parse_usage(prompt, output)
         return {"exit_code": process.returncode or 0, "output": output, "rate_limited": limited, "timed_out": timed_out, **usage}
@@ -210,9 +220,24 @@ class UnityWorker:
             report = f"# Отчет реализации\n\n{unity_status}\n\n## Git diff --stat\n\n```text\n{stat}\n```\n\n## Вывод CLI\n\n```text\n{result['output'][-20000:]}\n```"
             await self.send({"type": "TASK_COMPLETED", "task_id": task_id, "run_id": run_id, "report": report, "pr_url": pr_url, "worktree_path": str(path), "cli_used": selected.get("cli"), "model_used": selected.get("model", ""), "is_fallback": selected != config["primary"], **{k: v for k, v in result.items() if k in ("input_tokens", "output_tokens", "cache_tokens", "estimated")}})
             await self.send({"type": "TASK_META", "task_id": task_id, "tokens_estimated": result.get("estimated", False)})
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             await self.log(task_id, f"ERROR: {exc}\n")
             await self.send({"type": "TASK_FAILED", "task_id": task_id, "run_id": run_id, "error": str(exc)})
+
+    async def cancel(self, task_id: int) -> None:
+        process = self.processes.pop(task_id, None)
+        if process and process.returncode is None:
+            process.terminate()
+            try:
+                await asyncio.wait_for(process.wait(), 5)
+            except TimeoutError:
+                process.kill()
+                await process.wait()
+        job = self.jobs.pop(task_id, None)
+        if job and not job.done():
+            job.cancel()
 
     async def cleanup(self, message: dict[str, Any]) -> None:
         task_id = int(message["task_id"])
@@ -238,9 +263,14 @@ class UnityWorker:
                 async for raw in websocket:
                     message = json.loads(raw)
                     if message.get("type") == "ASSIGN_TASK":
+                        task_id = int(message["task_id"])
                         task = asyncio.create_task(self.assign(message))
+                        self.jobs[task_id] = task
                         running.add(task)
                         task.add_done_callback(running.discard)
+                        task.add_done_callback(lambda _task, task_id=task_id: self.jobs.pop(task_id, None))
+                    elif message.get("type") == "CANCEL_TASK":
+                        await self.cancel(int(message["task_id"]))
                     elif message.get("type") == "CLEANUP_WORKTREE":
                         await self.cleanup(message)
             finally:
