@@ -3,6 +3,8 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 spec = importlib.util.spec_from_file_location('unity_worker', Path(__file__).with_name('unity_worker.py'))
 module = importlib.util.module_from_spec(spec)
@@ -135,3 +137,71 @@ def test_finish_consumer_cancels_a_stuck_reader(tmp_path):
         assert consumer.cancelled()
 
     asyncio.run(scenario())
+
+
+def agent_result(exit_code=0, *, timed_out=False, rate_limited=False, output=''):
+    return {
+        'exit_code': exit_code, 'output': output, 'rate_limited': rate_limited,
+        'timed_out': timed_out, 'input_tokens': 0, 'output_tokens': 0, 'cache_tokens': 0, 'estimated': True,
+    }
+
+
+def fallback_worker(tmp_path, answers):
+    worker = make_worker(tmp_path)
+    worker.logs = []
+    calls = []
+
+    async def run_agent(task_id, path, config, prompt, timeout):
+        calls.append(config)
+        answer = answers[len(calls) - 1]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    async def log(task_id, text):
+        worker.logs.append(text)
+
+    worker.run_agent = run_agent
+    worker.log = log
+    return worker, calls
+
+
+def run_fallback(worker, config, triggers=None):
+    triggers = triggers or {'rate_limit': True, 'exit_code': True, 'timeout': True, 'timeout_minutes': 20}
+    return asyncio.run(worker.run_with_fallback(1, Path('.'), 'prompt', config, triggers))
+
+
+KIMI = {'cli': 'kimi', 'model': 'kimi-code/k3.1-pro'}
+ZCODE = {'cli': 'zcode', 'model': 'account:zai/GLM-5.4'}
+
+
+def test_failed_primary_switches_to_fallback(tmp_path):
+    worker, calls = fallback_worker(tmp_path, [agent_result(1), agent_result(0)])
+    selected, result = run_fallback(worker, {'primary': KIMI, 'fallback': [ZCODE]})
+    assert [call['cli'] for call in calls] == ['kimi', 'zcode']
+    assert selected == ZCODE
+    assert result['exit_code'] == 0
+    assert any('kimi (kimi-code/k3.1-pro): код возврата 1. Переключаюсь на fallback: zcode (account:zai/GLM-5.4)' in line for line in worker.logs)
+
+
+def test_unlaunchable_fallback_does_not_abort_the_stage(tmp_path):
+    worker, calls = fallback_worker(tmp_path, [ValueError('Для Custom CLI укажите command'), agent_result(0)])
+    selected, result = run_fallback(worker, {'primary': KIMI, 'fallback': [ZCODE]})
+    assert [call['cli'] for call in calls] == ['kimi', 'zcode']
+    assert selected == ZCODE
+    assert any('не удалось запустить CLI' in line and 'zcode' in line for line in worker.logs)
+
+
+def test_all_configs_failed_reports_each_reason(tmp_path):
+    worker, _ = fallback_worker(tmp_path, [agent_result(1), ValueError('boom')])
+    with pytest.raises(RuntimeError) as error:
+        run_fallback(worker, {'primary': KIMI, 'fallback': [ZCODE]})
+    message = str(error.value)
+    assert 'kimi (kimi-code/k3.1-pro): код возврата 1' in message
+    assert 'zcode (account:zai/GLM-5.4): boom' in message
+
+
+def test_timeout_is_reported_with_the_limit(tmp_path):
+    worker, _ = fallback_worker(tmp_path, [agent_result(-15, timed_out=True), agent_result(0)])
+    run_fallback(worker, {'primary': KIMI, 'fallback': [ZCODE]}, {'timeout': True, 'timeout_minutes': 7})
+    assert any('таймаут 7 мин' in line for line in worker.logs)

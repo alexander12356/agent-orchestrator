@@ -263,12 +263,61 @@ class UnityWorker:
         usage = parse_usage(prompt, output)
         return {"exit_code": process.returncode or 0, "output": output, "rate_limited": limited, "timed_out": timed_out, **usage}
 
+    @staticmethod
+    def config_label(config: dict[str, Any]) -> str:
+        cli = str(config.get("cli") or "custom")
+        model = str(config.get("model") or "").strip()
+        return f"{cli} ({model})" if model else cli
+
+    @staticmethod
+    def failure_details(result: dict[str, Any], timeout: int) -> str | None:
+        if result["rate_limited"]:
+            return "превышен лимит запросов"
+        if result["timed_out"]:
+            return f"таймаут {timeout} мин"
+        if result["exit_code"]:
+            return f"код возврата {result['exit_code']}"
+        return None
+
+    async def run_with_fallback(self, task_id: int, path: Path, prompt: str, config: dict[str, Any], triggers: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        timeout = int(triggers.get("timeout_minutes", 20))
+        configs = [config["primary"], *config.get("fallback", [])]
+        failures: list[str] = []
+        for index, candidate in enumerate(configs):
+            label = self.config_label(candidate)
+            if index:
+                await self.log(task_id, f"Fallback: {label} — запуск\n")
+            try:
+                result = await self.run_agent(task_id, path, candidate, prompt, timeout)
+            except Exception as exc:
+                failures.append(f"{label}: {exc}")
+                if index == len(configs) - 1:
+                    break
+                next_label = self.config_label(configs[index + 1])
+                await self.log(task_id, f"{label}: не удалось запустить CLI ({exc}). Переключаюсь на fallback: {next_label}\n")
+                continue
+            details = self.failure_details(result, timeout)
+            if details is None:
+                return candidate, result
+            failures.append(f"{label}: {details}")
+            if index == len(configs) - 1:
+                break
+            retry = (
+                (result["rate_limited"] and triggers.get("rate_limit", True))
+                or (result["timed_out"] and triggers.get("timeout", True))
+                or (bool(result["exit_code"]) and triggers.get("exit_code", True))
+            )
+            if not retry:
+                break
+            next_label = self.config_label(configs[index + 1])
+            await self.log(task_id, f"{label}: {details}. Переключаюсь на fallback: {next_label}\n")
+        raise RuntimeError("CLI завершился с ошибкой — " + "; ".join(failures))
+
     async def assign(self, message: dict[str, Any]) -> None:
         task_id, run_id = int(message["task_id"]), int(message["run_id"])
         config = message["agent_config"]
         triggers = config.get("triggers", {})
         path: Path | None = None
-        selected: dict[str, Any] = {}
         try:
             path = await self.prepare_worktree(task_id, message["branch_name"])
             docs = path / "orchestrator-tech-doc.md"
@@ -278,19 +327,7 @@ class UnityWorker:
             if review:
                 prompt += f"Замечания прошлого ревью:\n{review}\n"
             prompt += "Вноси только необходимые изменения. Не выполняй git commit/push: это сделает воркер."
-            result = None
-            configs = [config["primary"], *config.get("fallback", [])]
-            for index, selected in enumerate(configs):
-                result = await self.run_agent(task_id, path, selected, prompt, int(triggers.get("timeout_minutes", 20)))
-                retry = ((result["rate_limited"] and triggers.get("rate_limit", True)) or
-                         (result["timed_out"] and triggers.get("timeout", True)) or
-                         (result["exit_code"] and triggers.get("exit_code", True)))
-                if not retry or index == len(configs) - 1:
-                    break
-                await self.log(task_id, f"Переключение на fallback: {selected.get('cli')}\n")
-            assert result
-            if result["exit_code"] or result["timed_out"]:
-                raise RuntimeError("CLI завершился с ошибкой")
+            selected, result = await self.run_with_fallback(task_id, path, prompt, config, triggers)
             unity_status = await self.run_unity(path, task_id)
             docs.unlink(missing_ok=True)
             code, _ = await self.execute(["git", "diff", "--quiet"], path)
