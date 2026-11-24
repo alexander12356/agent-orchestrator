@@ -88,6 +88,24 @@ def test_export_keeps_only_files_named_by_the_task(tmp_path, monkeypatch):
     assert (tmp_path / "repo" / "Docs" / "agent" / "drafts" / "ZEL-17.md").read_text(encoding="utf-8") == "draft"
 
 
+def test_export_includes_files_changed_on_the_task_branch(tmp_path, monkeypatch):
+    origin = tmp_path / 'origin'
+    origin.mkdir()
+    git(origin, 'init', '-b', 'main')
+    commit(origin, 'AGENTS.md', 'rules')
+    commit(origin, 'README.md', 'main')
+    git(origin, 'checkout', '-b', 'feat/task-63')
+    commit(origin, 'Assets/Scripts/Gameplay/SessionTasks.cs', 'class SessionTasks {}')
+    commit(origin, 'Assets/Scripts/Gameplay/SessionTasks.cs.meta', 'guid: test')
+    monkeypatch.setattr(settings, 'storage_dir', tmp_path / 'storage')
+    checkout, _ref = prepare_checkout(origin.as_uri(), 63, 'feat/task-63')
+
+    copied, _missing = export_task_files(checkout, tmp_path / 'repo', 'Проверь реализацию задачи.')
+
+    assert 'Assets/Scripts/Gameplay/SessionTasks.cs' in copied
+    assert 'README.md' not in copied
+
+
 def test_missing_remote_branches_raise(tmp_path, monkeypatch):
     origin = tmp_path / "origin"
     origin.mkdir()

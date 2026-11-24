@@ -107,7 +107,7 @@
 3. **Роль (Системный промпт):** Многострочное поле с инструкциями, которые добавляются в контекст при запуске.
 4. **Лимит одновременных задач (Concurrency Limit):** Число (по умолчанию 1). Если бот занят, новые задачи встают в очередь к нему.
 5. **Основная модель (Primary):**
-   - CLI-утилита: Claude Code | Codex CLI | Gemini CLI | Aider | Custom CLI.
+   - CLI-утилита: Claude Code | Codex CLI | Gemini CLI | Aider | Kimi Code CLI | ZCode CLI | Custom CLI.
    - Идентификатор модели (например, `claude-sonnet-4-6`, `gpt-5-codex`, `gemini-2.5-pro`).
    - Среда выполнения: Server (VDS) или Local Worker (Unity PC).
 6. **Резервные модели (Fallback Chain):** Упорядоченный список (Drag-and-Drop) запасных связок (CLI + Модель + Среда).
@@ -187,7 +187,7 @@ orchestrator/
 2. **Выдача задания (`ASSIGN_TASK`):**
    - VDS отправляет JSON: `task_id`, `branch_name` (`feat/task-{id}`), `tech_doc_content`, `review_comments_content` (если был возврат), `agent_config` (primary + fallback цепочка).
 3. **Исполнение на ПК с Unity:**
-   - Воркер проверяет/создаёт изолированный git worktree от свежего `origin/main` (с использованием симлинка/junction на эталонную папку кэша Library для быстрой инициализации Unity и мьютекса на запуск `Unity.exe -batchmode`).
+   - Воркер проверяет/создаёт изолированный git worktree от свежего `origin/main` с отдельной локальной `Library` и мьютексом на запуск `Unity.exe -batchmode`; повторный запуск сохраняет существующий worktree и его `Library`.
    - Запускает локальный CLI-агент, транслирует строки stdout/stderr на VDS в реальном времени (`LOG_CHUNK`).
    - При срабатывании триггера ошибки/лимита переключается на следующую модель из `fallback_configs`.
    - После успешного завершения делает `git add`, `git commit`, `git push origin feat/task-{id}` (и создаёт Draft PR через `gh pr create --draft`, если ещё не создан).
@@ -206,5 +206,5 @@ orchestrator/
 1. **Этап 1 (База и API):** Инициализация проекта, схема SQLite, CRUD API для ботов (`agents`), задач (`tasks`) и зависимостей (`task_dependencies`), защита от циклов в зависимостях.
 2. **Этап 2 (Раннер VDS и парсеры):** Реализация CLIRunner на VDS с поддержкой headless-запуска CLI, парсингом токенов, fallback-цепочками и стримингом логов по SSE.
 3. **Этап 3 (Webhooks и Интеграции):** Эндпоинты `/api/webhooks/git` (отслеживание Merge в main и разблокировка дочерних задач) и `/api/webhooks/tracker` (цикл вопросов-ответов по ТЗ).
-4. **Этап 4 (Local Unity Worker):** Написание `unity_worker.py` с WebSocket-клиентом, управлением git worktree + симлинком Library и исполнением Шага 3.
+4. **Этап 4 (Local Unity Worker):** Написание `unity_worker.py` с WebSocket-клиентом, управлением git worktree с изолированной Library и исполнением Шага 3.
 5. **Этап 5 (Фронтенд):** Сборка интерфейса на React + TypeScript + React Flow (Таблица задач с чекбоксами зависимостей, Граф с плашками артефактов и токенов, Инспектор, Конструктор ботов).

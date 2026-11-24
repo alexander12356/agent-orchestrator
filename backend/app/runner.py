@@ -3,11 +3,15 @@ import json
 import os
 import re
 import shlex
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 RATE_LIMIT_RE = re.compile(r"rate.?limit|usage.?limit|quota exceeded|\b429\b|try again later", re.I)
+KIMI_NODE = Path("/home/paperclip/.local/opt/node-v24.15.0-linux-x64/bin/node")
+KIMI_ENTRY = Path("/mnt/e/WSL/ZelyaKimiWindows/node_modules/@moonshot-ai/kimi-code/dist/main.mjs")
+KIMI_HOME = Path("/mnt/c/Users/Meku/.kimi-code")
 
 
 @dataclass
@@ -37,13 +41,17 @@ class ProcessRunner:
         timeout_minutes: int,
     ) -> RunResult:
         command = build_command(config, prompt, cwd, int(env.get("ORCHESTRATOR_STAGE", "0")), Path(env["ORCHESTRATOR_REPO"]) if env.get("ORCHESTRATOR_REPO") else None)
-        process = await asyncio.create_subprocess_exec(
-            *command,
-            cwd=cwd,
-            env={**os.environ, **env},
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *command,
+                cwd=cwd,
+                env={**os.environ, **env, **cli_environment(config)},
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT,
+            )
+        except FileNotFoundError:
+            return RunResult(127, f"CLI не найден: {command[0]}\n")
         if self.on_process:
             self.on_process(process)
         lines: list[str] = []
@@ -104,11 +112,31 @@ def build_command(config: dict[str, Any], prompt: str, cwd: Path, stage: int = 0
         args = [part.format_map(values) for part in parts]
         if not any("{prompt}" in part for part in parts):
             args.append(prompt)
-        return _with_live_output(args)
+        return _with_live_output(_resolve_known_cli(args))
     if cli == "claude":
         args = ["claude", "-p", prompt, "--output-format", "json"]
     elif cli == "codex":
-        args = ["codex", "exec", prompt]
+        args = ["codex", "exec", "--skip-git-repo-check", "-s", "workspace-write"]
+        if model:
+            args.extend(["--model", model])
+        effort = str(config.get("reasoning_effort") or "").strip()
+        if effort:
+            args.extend(["-c", f'model_reasoning_effort="{effort}"'])
+        args.append(prompt)
+        return _with_live_output(_resolve_known_cli(args))
+    elif cli == "kimi":
+        args = ["kimi", "--output-format", "stream-json"]
+        if model:
+            args.extend(["-m", model])
+        args.extend(["-p", prompt])
+        return _with_live_output(_resolve_known_cli(args))
+    elif cli == "zcode":
+        # zcode-app-cli accepts an explicit provider/model id per run; agents
+        # that leave the model empty fall back to the saved ZCode default.
+        args = [zcode_program(), "-p", prompt, "--mode", "yolo", "--no-color"]
+        if model:
+            args[1:1] = ["--model", model]
+        return _with_live_output(args)
     elif cli == "gemini":
         args = ["gemini", "-p", prompt]
     elif cli == "aider":
@@ -117,7 +145,79 @@ def build_command(config: dict[str, Any], prompt: str, cwd: Path, stage: int = 0
         raise ValueError("Custom CLI requires a command")
     if model:
         args.extend(["--model", model])
-    return _with_live_output(args)
+    return _with_live_output(_resolve_known_cli(args))
+
+
+def cli_environment(config: dict[str, Any]) -> dict[str, str]:
+    command = str(config.get("command") or "")
+    program = Path(shlex.split(command)[0]).name.lower().removesuffix(".exe") if command else ""
+    if config.get("cli") == "zcode" or program == "zcode":
+        return {"CI": "1", "NO_COLOR": "1"}
+    if config.get("cli") != "kimi" and program != "kimi":
+        return {}
+    environment = {"CI": "1", "NO_COLOR": "1", "KIMI_CODE_NO_AUTO_UPDATE": "1"}
+    if kimi_launcher() and KIMI_HOME.is_dir():
+        environment["KIMI_CODE_HOME"] = str(KIMI_HOME)
+    effort = resolve_kimi_effort(str(config.get("reasoning_effort") or ""))
+    if effort:
+        environment["KIMI_MODEL_THINKING_EFFORT"] = effort
+    return environment
+
+
+def resolve_kimi_effort(effort: str) -> str:
+    normalized = effort.strip().lower()
+    if normalized == "medium":
+        return "high"
+    if normalized in {"low", "high", "max"}:
+        return normalized
+    return ""
+
+
+def _resolve_known_cli(args: list[str]) -> list[str]:
+    if not args:
+        return args
+    program = Path(args[0]).name.lower().removesuffix(".exe")
+    if program not in {"codex", "kimi"}:
+        return args
+    if program == "kimi":
+        launcher = kimi_launcher()
+        if launcher:
+            return [*launcher, *args[1:]]
+    return [resolve_executable(program), *args[1:]]
+
+
+def kimi_launcher() -> list[str]:
+    if os.name != "nt" and KIMI_NODE.is_file() and KIMI_ENTRY.is_file():
+        return [str(KIMI_NODE), str(KIMI_ENTRY)]
+    return []
+
+
+def zcode_program() -> str:
+    return resolve_executable("zcode")
+
+
+def resolve_executable(name: str) -> str:
+    found = shutil.which(name)
+    if found:
+        return found
+    candidates: list[Path] = []
+    if name == "codex":
+        candidates.extend(Path("/mnt/c/Users").glob("*/AppData/Local/OpenAI/Codex/bin/*/codex.exe"))
+    if name == "kimi":
+        candidates.extend([
+            Path("/home/paperclip/.local/bin/kimi"),
+            Path.home() / ".local" / "bin" / "kimi",
+            Path("/usr/local/bin/kimi"),
+        ])
+    if name == "zcode":
+        candidates.extend([
+            Path("/usr/local/bin/zcode"),
+            Path.home() / ".local" / "bin" / "zcode",
+        ])
+    existing = [path for path in candidates if path.is_file()]
+    if not existing:
+        return name
+    return str(max(existing, key=lambda path: path.stat().st_mtime))
 
 
 def _with_live_output(args: list[str]) -> list[str]:

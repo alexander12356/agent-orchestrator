@@ -5,15 +5,78 @@ import json
 import os
 import re
 import shlex
+import shutil
 import signal
-import subprocess
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
 import websockets
 
 RATE_LIMIT_RE = re.compile(r"rate.?limit|usage.?limit|quota exceeded|\b429\b|try again later", re.I)
+KIMI_NODE = Path("/mnt/c/Program Files/nodejs/node.exe")
+KIMI_ENTRY = Path("/mnt/e/WSL/ZelyaKimiWindows/node_modules/@moonshot-ai/kimi-code/dist/main.mjs")
+ZCODE_NODE = Path("/mnt/c/Program Files/nodejs/node.exe")
+
+
+def kimi_launcher() -> list[str]:
+    if os.name != "nt" and KIMI_NODE.is_file() and KIMI_ENTRY.is_file():
+        return [str(KIMI_NODE), windows_path(KIMI_ENTRY)]
+    return [shutil.which("kimi") or "kimi"]
+
+
+def windows_path(path: Path) -> str:
+    text = path.as_posix()
+    if text.startswith("/mnt/") and len(text) > 6 and text[6] == "/":
+        return f"{text[5].upper()}:\\{text[7:].replace('/', '\\')}"
+    return str(path)
+
+
+def kimi_environment(config: dict[str, Any]) -> dict[str, str]:
+    environment = {"CI": "1", "NO_COLOR": "1", "KIMI_CODE_NO_AUTO_UPDATE": "1"}
+    effort = str(config.get("reasoning_effort") or "").strip().lower()
+    if effort == "medium":
+        effort = "high"
+    if effort in {"low", "high", "max"}:
+        environment["KIMI_MODEL_THINKING_EFFORT"] = effort
+    return environment
+
+
+def kimi_command(config: dict[str, Any], prompt: str) -> list[str]:
+    args = [*kimi_launcher(), "--output-format", "stream-json"]
+    model = str(config.get("model") or "").strip()
+    if model:
+        args += ["-m", model]
+    args += ["-p", prompt]
+    return args
+
+
+def zcode_launcher() -> list[str]:
+    found = shutil.which("zcode")
+    if found:
+        return [found]
+    node = Path(r"C:\Program Files\nodejs\node.exe") if os.name == "nt" else ZCODE_NODE
+    pattern = Path.home().glob("AppData/Local/Programs/ZCode/resources/glm/zcode.cjs") if os.name == "nt" else Path("/mnt/c/Users").glob("*/AppData/Local/Programs/ZCode/resources/glm/zcode.cjs")
+    entries = [path for path in pattern if path.is_file()]
+    if node.is_file() and entries:
+        return [str(node), windows_path(max(entries, key=lambda path: path.stat().st_mtime))]
+    return ["zcode"]
+
+
+def zcode_command(prompt: str) -> list[str]:
+    return [*zcode_launcher(), "-p", prompt, "--mode", "yolo", "--no-color"]
+
+
+def zcode_environment() -> dict[str, str]:
+    environment = {"CI": "1", "NO_COLOR": "1"}
+    launcher = zcode_launcher()
+    if len(launcher) != 2:
+        return environment
+    entry = Path(launcher[1])
+    resources = entry.parent.parent
+    environment["ZCODE_BUILTIN_PROVIDER_CONFIG_FILE"] = str(resources / "config" / "provider" / "zcode-builtin.json")
+    environment["ZCODE_CREDENTIALS_FILE"] = str(Path.home() / ".zcode" / "cli" / "credentials.json")
+    return environment
 
 
 class UnityWorker:
@@ -22,7 +85,6 @@ class UnityWorker:
         self.token = args.token
         self.repo = Path(args.repo).resolve()
         self.worktrees = Path(args.worktrees).resolve()
-        self.library = Path(args.library).resolve() if args.library else None
         self.unity = args.unity
         self.websocket: Any = None
         self.stopping = False
@@ -54,27 +116,17 @@ class UnityWorker:
             raise ValueError("Некорректное имя ветки")
         path = self.worktrees / f"task-{task_id}"
         await self.checked(["git", "fetch", "origin", "main"], self.repo)
-        if path.exists():
-            await self.checked(["git", "reset", "--hard", "origin/main"], path)
-        else:
+        if not path.exists():
             self.worktrees.mkdir(parents=True, exist_ok=True)
             code, _ = await self.execute(["git", "show-ref", "--verify", f"refs/heads/{branch}"], self.repo)
             if code == 0:
                 await self.checked(["git", "branch", "-D", branch], self.repo)
             await self.checked(["git", "worktree", "add", "-b", branch, str(path), "origin/main"], self.repo)
-        await self.link_library(path)
+        await self.prepare_library(path)
         return path
 
-    async def link_library(self, path: Path) -> None:
-        if not self.library or not self.library.exists():
-            return
-        target = path / "Library"
-        if target.exists() or target.is_symlink():
-            return
-        if os.name == "nt":
-            await self.checked(["cmd", "/c", "mklink", "/J", str(target), str(self.library)])
-        else:
-            target.symlink_to(self.library, target_is_directory=True)
+    async def prepare_library(self, path: Path) -> None:
+        (path / "Library").mkdir(parents=True, exist_ok=True)
 
     @contextmanager
     def unity_mutex(self):
@@ -103,13 +155,17 @@ class UnityWorker:
                 else:
                     fcntl.flock(lock, fcntl.LOCK_UN)
 
+    def unity_command(self, path: Path) -> list[str]:
+        return [
+            self.unity, "-batchmode", "-quit", "-projectPath", windows_path(path),
+            "-logFile", windows_path(path / "unity-build.log"),
+        ]
+
     async def run_unity(self, path: Path, task_id: int) -> str:
         if not self.unity:
             return "Unity Editor не настроен; сборка не запускалась."
         with self.unity_mutex():
-            code, output = await self.execute([
-                self.unity, "-batchmode", "-quit", "-projectPath", str(path), "-logFile", str(path / "unity-build.log")
-            ])
+            code, output = await self.execute(self.unity_command(path))
         if code:
             raise RuntimeError(f"Unity batchmode завершился с кодом {code}: {output}")
         return "Unity batchmode завершился успешно."
@@ -128,6 +184,10 @@ class UnityWorker:
             args = ["claude", "-p", prompt, "--output-format", "json"]
         elif cli == "codex":
             args = ["codex", "exec", prompt]
+        elif cli == "kimi":
+            return kimi_command(config, prompt)
+        elif cli == "zcode":
+            return zcode_command(prompt)
         elif cli == "gemini":
             args = ["gemini", "-p", prompt]
         elif cli == "aider":
@@ -136,11 +196,40 @@ class UnityWorker:
             raise ValueError("Для Custom CLI укажите command")
         if model:
             args += ["--model", model]
+        effort = str(config.get("reasoning_effort") or "").strip()
+        if cli == "codex" and effort:
+            args += ["-c", f'model_reasoning_effort="{effort}"']
         return args
 
+    async def terminate_process(self, process: asyncio.subprocess.Process, timeout: float = 5) -> None:
+        if process.returncode is not None:
+            return
+        with suppress(ProcessLookupError):
+            process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout)
+        except TimeoutError:
+            with suppress(ProcessLookupError):
+                process.kill()
+            await asyncio.wait_for(process.wait(), timeout)
+
+    async def finish_consumer(self, consumer: asyncio.Task[Any], timeout: float = 5) -> None:
+        try:
+            await asyncio.wait_for(asyncio.shield(consumer), timeout)
+        except TimeoutError:
+            consumer.cancel()
+            with suppress(asyncio.CancelledError):
+                await consumer
+
     async def run_agent(self, task_id: int, path: Path, config: dict[str, Any], prompt: str, timeout: int) -> dict[str, Any]:
+        command = self.command(config, prompt, path)
+        env = os.environ.copy()
+        if config.get("cli") == "kimi":
+            env.update(kimi_environment(config))
+        if config.get("cli") == "zcode":
+            env.update(zcode_environment())
         process = await asyncio.create_subprocess_exec(
-            *self.command(config, prompt, path), cwd=path, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+            *command, cwd=path, env=env, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
         )
         self.processes[task_id] = process
         lines: list[str] = []
@@ -153,9 +242,9 @@ class UnityWorker:
                 text = raw.decode("utf-8", errors="replace")
                 lines.append(text)
                 await self.log(task_id, text)
-                if RATE_LIMIT_RE.search(text):
+                if RATE_LIMIT_RE.search(text) and not limited:
                     limited = True
-                    process.terminate()
+                    await self.terminate_process(process)
 
         consumer = asyncio.create_task(consume())
         timed_out = False
@@ -164,14 +253,11 @@ class UnityWorker:
                 await asyncio.wait_for(process.wait(), timeout * 60)
             except TimeoutError:
                 timed_out = True
-                process.terminate()
-                await process.wait()
-            await consumer
+                await self.terminate_process(process)
         finally:
             if process.returncode is None:
-                process.terminate()
-            if not consumer.done():
-                consumer.cancel()
+                await self.terminate_process(process)
+            await self.finish_consumer(consumer)
             self.processes.pop(task_id, None)
         output = "".join(lines)
         usage = parse_usage(prompt, output)
@@ -229,12 +315,7 @@ class UnityWorker:
     async def cancel(self, task_id: int) -> None:
         process = self.processes.pop(task_id, None)
         if process and process.returncode is None:
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), 5)
-            except TimeoutError:
-                process.kill()
-                await process.wait()
+            await self.terminate_process(process)
         job = self.jobs.pop(task_id, None)
         if job and not job.done():
             job.cancel()

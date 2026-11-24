@@ -3,13 +3,14 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
-CLI = Literal["claude", "codex", "gemini", "aider", "custom"]
+CLI = Literal["claude", "codex", "gemini", "aider", "kimi", "zcode", "custom"]
 Environment = Literal["server", "worker"]
 
 
 class ModelConfig(BaseModel):
     cli: CLI = "custom"
     model: str = ""
+    reasoning_effort: str = ""
     environment: Environment = "server"
     command: str | None = None
 

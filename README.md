@@ -35,7 +35,17 @@ Vite доступен на `http://localhost:5173` и проксирует API �
 
 ## Настройка CLI
 
-В профиле бота выберите Claude Code, Codex, Gemini или Aider. Утилита должна быть установлена и авторизована в среде выполнения. Поле `command` позволяет переопределить команду и подключить любой Custom CLI.
+В профиле бота выберите Claude Code, Codex, Kimi, ZCode, Gemini или Aider. Утилита должна быть установлена и авторизована в среде выполнения. Поле `command` позволяет переопределить команду и подключить любой Custom CLI.
+
+ZCode CLI (Z.ai) ставится нативно в Ubuntu/WSL одним скриптом — он поднимает Node.js 22, глобальный пакет `zcode-app-cli` (терминальный клиент официального рантайма ZCode), хранилище учётных данных без keyring и обновляет каталог моделей до актуального релиза:
+
+```bash
+sudo bash scripts/install-zcode-cli.sh
+zcode login --no-browser
+zcode --model account:zai-individual-coding-plan/GLM-5.4 -p 'Reply with OK.'
+```
+
+`zcode login --no-browser` печатает ссылку авторизации Z.ai: откройте её один раз и подтвердите доступ. Полная ссылка на модель передаётся в поле «Модель» профиля бота (`provider/model`, например `account:zai-individual-coding-plan/GLM-5.4`); если поле пустое, используется модель, сохранённая в ZCode. Промпт всегда запускается с `--mode yolo`, чтобы агент мог писать файлы без подтверждений. После обновления `zcode-app-cli` повторите скрипт: он заново подтягивает каталог моделей.
 
 Поддерживаются placeholder-ы `{prompt}`, `{model}`, `{artifact_dir}`, `{task_id}`, `{stage}`. Если `{prompt}` отсутствует, промпт добавляется последним аргументом. Пример:
 
@@ -57,11 +67,10 @@ python worker/unity_worker.py \
   --server ws://VDS:8000/ws/worker \
   --token "$ORCHESTRATOR_WORKER_TOKEN" \
   --repo /path/to/UnityProject \
-  --worktrees /path/to/worktrees \
-  --library /path/to/UnityProject/Library
+  --worktrees /path/to/worktrees
 ```
 
-На Windows удобно задать параметры через переменные из `worker/.env.example` и запустить `python worker/unity_worker.py`. `--unity` / `UNITY_EDITOR` включает последовательный `Unity.exe -batchmode`; без пути к редактору Unity-сборка явно не выполняется. Воркер создает worktree от `origin/main`, связывает эталонную `Library` symlink/junction, запускает CLI, коммитит изменения, делает push и создает Draft PR. После merge удаляет worktree и ветку.
+На Windows удобно задать параметры через переменные из `worker/.env.example` и запустить `python worker/unity_worker.py`. `--unity` / `UNITY_EDITOR` включает последовательный `Unity.exe -batchmode`; без пути к редактору Unity-сборка явно не выполняется. Воркер создает worktree от `origin/main`, использует отдельную локальную `Library` для каждой задачи, запускает CLI, коммитит изменения, делает push и создает Draft PR. Повторный запуск продолжает существующий worktree и сохраняет его `Library`. Параметр `--library` / `UNITY_REFERENCE_LIBRARY` принимается для совместимости, но общая `Library` больше не связывается с worktree. После merge удаляет worktree и ветку.
 
 **Важно:** настройте `git user.name`/`user.email`, права push и `gh`. Не используйте общий worktree для ручной разработки.
 

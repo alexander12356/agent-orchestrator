@@ -64,6 +64,8 @@ def export_task_files(checkout: Path, destination: Path, text: str) -> tuple[lis
     destination.mkdir(parents=True, exist_ok=True)
     if not add_file("AGENTS.md"):
         missing.append("AGENTS.md")
+    for name in _changed_files(checkout):
+        add_file(name)
     for key in sorted(set(ISSUE_RE.findall(text))):
         matches = sorted(name for name in names if key in name and (name.startswith("Docs/") or name.endswith(".md")))
         if not matches:
@@ -105,10 +107,27 @@ def _tracked_files(checkout: Path) -> list[str]:
     return [line for line in output.splitlines() if line]
 
 
+def _changed_files(checkout: Path) -> list[str]:
+    for base in ("main", "master"):
+        try:
+            output = _git(["diff", "--name-only", base, "HEAD"], checkout)
+        except RepoError:
+            continue
+        return [line for line in output.splitlines() if line]
+    return []
+
+
 def prepare_checkout(url: str, task_id: int, branch: str, external_id: str = "") -> tuple[Path, str]:
     ref = _select_branch(url, branch, external_id)
     mirror = _ensure_mirror(url)
-    _git(["fetch", "--depth", "1", "origin", f"+refs/heads/{ref}:refs/heads/{ref}"], mirror)
+    _git(["fetch", "--depth", "50", "origin", f"+refs/heads/{ref}:refs/heads/{ref}"], mirror)
+    if ref not in {"main", "master"}:
+        for base in ("main", "master"):
+            try:
+                _git(["fetch", "--depth", "50", "origin", f"+refs/heads/{base}:refs/heads/{base}"], mirror)
+                break
+            except RepoError:
+                continue
     checkout = settings.storage_dir / "checkouts" / str(task_id)
     checkout.parent.mkdir(parents=True, exist_ok=True)
     if (checkout / ".git").exists():
