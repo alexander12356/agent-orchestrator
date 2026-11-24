@@ -4,7 +4,7 @@ import httpx
 
 from app.config import settings
 from app.database import connect
-from app.tracker import BOT_PREFIX, ensure_webhook, publish_questions, test_connection as check_connection
+from app.tracker import BOT_PREFIX, ensure_webhook, fetch_import_tasks, publish_questions, test_connection as check_connection
 from conftest import make_task
 
 
@@ -37,6 +37,10 @@ def response(status=200, payload=None):
 def save_settings(client, **values):
     data = {
         'tracker_api_token': 'secret-key',
+        'yougile_project': 'Unity',
+        'yougile_board': 'Development',
+        'yougile_sticker': '',
+        'yougile_team_url': 'https://ru.yougile.com/team/068505cc4436/',
         'tracker_webhook_secret': 'webhook-secret',
         'yougile_webhook_id': '',
         'git_webhook_secret': '',
@@ -133,3 +137,101 @@ def test_yougile_webhook_accepts_answer(client, agent, monkeypatch):
     assert result.json() == {'accepted': True, 'task_id': task['id']}
     assert client.get(f"/api/tasks/{task['id']}").json()['status'] == 'queued'
     assert 'fixed timestep' in (settings.storage_dir / 'tasks' / str(task['id']) / '01_answers_v1.md').read_text()
+
+
+def test_fetch_import_tasks_includes_descriptions_and_chats(client, monkeypatch):
+    save_settings(client)
+    FakeClient.requests = []
+    FakeClient.responses = [
+        response(payload={'content': [{'id': 'project-id', 'title': 'Unity'}]}),
+        response(payload={'content': [{'id': 'board-id', 'title': 'Development'}]}),
+        response(payload={'content': [
+            {'id': 'open-id', 'title': 'Open'},
+            {'id': 'ready-id', 'title': 'Ready'},
+            {'id': 'done-id', 'title': 'Done'},
+        ]}),
+        response(payload={'content': [{'id': 'user-id', 'realName': 'Alice'}]}),
+        response(payload={'content': [{'id': 'task-open', 'idTaskProject': 'ZEL-17', 'title': 'Open task', 'description': 'Open description'}]}),
+        response(payload={'content': [{'id': 1700000000000, 'fromUserId': 'user-id', 'text': 'Open chat'}]}),
+        response(payload={'content': [{'id': 'task-ready', 'title': 'Ready task', 'description': 'Ready description'}]}),
+        response(payload={'content': [{'id': 1700000001000, 'fromUserId': 'user-id', 'text': 'Ready chat'}]}),
+    ]
+    monkeypatch.setattr('app.tracker.httpx.AsyncClient', FakeClient)
+
+    result = asyncio.run(fetch_import_tasks('Unity', 'Development'))
+
+    assert [task['id'] for task in result] == ['task-open', 'task-ready']
+    assert result[0]['description'] == 'Open description'
+    assert result[0]['key'] == 'ZEL-17'
+    assert 'Alice' in result[0]['chat']
+    assert 'Open chat' in result[0]['chat']
+    assert 'Ready chat' in result[1]['chat']
+    task_requests = [request for request in FakeClient.requests if request[1].endswith('/tasks')]
+    assert [request[2]['params']['columnId'] for request in task_requests] == ['open-id', 'ready-id']
+
+
+def test_import_endpoint_is_idempotent_and_preserves_active_tasks(client, monkeypatch):
+    save_settings(client)
+    items = [
+        {'id': 'task-open', 'key': 'ZEL-17', 'title': 'Open task', 'description': 'Description', 'chat': '# Чат Yougile\n\nHello\n'},
+        {'id': 'task-ready', 'key': 'ZEL-18', 'title': 'Ready task', 'description': 'Ready', 'chat': '# Чат Yougile\n'},
+    ]
+
+    async def fetch(project, board, sticker):
+        assert (project, board, sticker) == ('Unity', 'Development', '')
+        return items
+
+    monkeypatch.setattr('app.main.fetch_import_tasks', fetch)
+    first = client.post('/api/integrations/yougile/import')
+    assert first.status_code == 200
+    assert first.json() == {'imported': 2, 'updated': 0, 'skipped': 0, 'total': 2}
+    tasks = client.get('/api/tasks').json()
+    assert {task['status'] for task in tasks} == {'open'}
+    assert all(task['current_agent'] is None for task in tasks)
+    assert next(task for task in tasks if task['external_issue_id'] == 'task-open')['external_issue_key'] == 'ZEL-17'
+    assert next(task for task in tasks if task['external_issue_id'] == 'task-open')['external_issue_url'] == 'https://ru.yougile.com/team/068505cc4436/#ZEL-17'
+    with connect() as conn:
+        conn.execute("UPDATE tasks SET milestone='Прототип', sprint='Спринт 1'")
+    imported_open = next(task for task in tasks if task['external_issue_id'] == 'task-open')
+    directory = settings.storage_dir / 'tasks' / str(imported_open['id'])
+    assert (directory / '00_task.md').exists()
+    assert 'Hello' in (directory / '00_yougile_chat.md').read_text()
+
+    second = client.post('/api/integrations/yougile/import')
+    assert second.json() == {'imported': 0, 'updated': 2, 'skipped': 0, 'total': 2}
+    assert len(client.get('/api/tasks').json()) == 2
+    assert all(task['milestone'] == 'Прототип' and task['sprint'] == 'Спринт 1' for task in client.get('/api/tasks').json())
+
+    with connect() as conn:
+        conn.execute("UPDATE tasks SET status='running', title='Local title' WHERE external_issue_id='task-open'")
+    third = client.post('/api/integrations/yougile/import')
+    assert third.json() == {'imported': 0, 'updated': 1, 'skipped': 1, 'total': 2}
+    active = next(task for task in client.get('/api/tasks').json() if task['external_issue_id'] == 'task-open')
+    assert active['title'] == 'Local title'
+
+
+def test_import_filters_tasks_by_sticker_state(client, monkeypatch):
+    save_settings(client)
+    FakeClient.requests = []
+    FakeClient.responses = [
+        response(payload={'content': [{'id': 'project-id', 'title': 'Unity'}]}),
+        response(payload={'content': [{'id': 'board-id', 'title': 'Development'}]}),
+        response(payload={'content': [{'id': 'open-id', 'title': 'Open'}, {'id': 'ready-id', 'title': 'Ready'}]}),
+        response(payload={'content': [{'id': 'sticker-id', 'name': 'Development', 'states': [{'id': 'state-id', 'name': 'Код'}]}]}),
+        response(payload={'content': [{'id': 'user-id', 'realName': 'Alice'}]}),
+        response(payload={'content': [
+            {'id': 'matching', 'title': 'Matching', 'stickers': {'sticker-id': 'state-id'}},
+            {'id': 'other', 'title': 'Other', 'stickers': {'sticker-id': 'other-state'}},
+            {'id': 'missing', 'title': 'Missing', 'stickers': {}},
+        ]}),
+        response(payload={'content': [{'id': 1700000000000, 'fromUserId': 'user-id', 'text': 'Chat'}]}),
+        response(payload={'content': []}),
+    ]
+    monkeypatch.setattr('app.tracker.httpx.AsyncClient', FakeClient)
+
+    result = asyncio.run(fetch_import_tasks('Unity', 'Development', 'Development.Код'))
+
+    assert [task['id'] for task in result] == ['matching']
+    sticker_request = next(request for request in FakeClient.requests if request[1].endswith('/string-stickers'))
+    assert sticker_request[2]['params']['name'] == 'Development'
+    assert not any(request[1].endswith('/chats/other/messages') for request in FakeClient.requests)

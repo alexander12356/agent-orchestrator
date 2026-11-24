@@ -12,4 +12,4 @@ export async function api<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 export const fmtTokens = (n: number) => n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n || 0);
-export const stageName = (stage: number, status?: string) => status === 'waiting_answer' ? '1.5. Ожидает ответа по ТЗ' : ['Ожидает влития в main', 'Тех. документация', 'Ревью документации', 'Реализация', 'Ревью реализации', 'Готово к PR', 'Завершено'][stage];
+export const stageName = (stage: number, status?: string) => status === 'open' ? 'Open' : status === 'waiting_answer' ? '1.5. Ожидает ответа по ТЗ' : ['Ожидает влития в main', 'Тех. документация', 'Ревью документации', 'Реализация', 'Ревью реализации', 'Готово к PR', 'Завершено'][stage];

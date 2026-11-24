@@ -48,6 +48,8 @@ class TaskBase(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     description: str = ""
     external_issue_id: str | None = None
+    milestone: str = ""
+    sprint: str = ""
     dependencies: list[int] = []
     stage_agents: dict[int, int] = {}
 
@@ -70,6 +72,10 @@ class ManualMerge(BaseModel):
 
 class IntegrationSettings(BaseModel):
     tracker_api_token: str = ""
+    yougile_project: str = ""
+    yougile_board: str = ""
+    yougile_sticker: str = ""
+    yougile_team_url: str = "https://ru.yougile.com/team/068505cc4436/"
     tracker_webhook_secret: str = ""
     yougile_webhook_id: str = ""
     git_webhook_secret: str = ""

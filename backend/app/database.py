@@ -26,6 +26,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     title TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     external_issue_id TEXT,
+    external_issue_key TEXT,
+    external_issue_url TEXT,
+    milestone TEXT,
+    sprint TEXT,
     current_stage INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'queued',
     branch_name TEXT NOT NULL,
@@ -95,6 +99,10 @@ def init_db() -> None:
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
     with connect() as conn:
         conn.executescript(SCHEMA)
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
+        for column in ("external_issue_key", "external_issue_url", "milestone", "sprint"):
+            if column not in columns:
+                conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} TEXT")
 
 
 @contextmanager

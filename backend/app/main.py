@@ -4,6 +4,7 @@ import hmac
 import json
 import mimetypes
 import secrets
+import shutil
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -20,7 +21,7 @@ from .database import connect, decode_agent, decode_task, dumps, init_db, now, t
 from .dispatcher import dispatcher, task_dir
 from .events import bus
 from .schemas import AgentCreate, AgentUpdate, IntegrationSettings, ManualMerge, TaskCreate, TaskUpdate, TrackerAnswer
-from .tracker import BOT_PREFIX, YougileError, ensure_webhook, integration_settings, test_connection
+from .tracker import BOT_PREFIX, YougileError, ensure_webhook, fetch_import_tasks, integration_settings, test_connection
 from .worker_hub import hub
 
 
@@ -56,7 +57,7 @@ def task_view(task: dict[str, Any], conn: Any) -> dict[str, Any]:
         (task["id"],),
     ).fetchall()
     task["dependencies"] = [dict(row) for row in dependencies]
-    agent_id = task["stage_agents"].get(task["current_stage"])
+    agent_id = task["stage_agents"].get(task["current_stage"]) if task["status"] != "open" else None
     task["current_agent"] = decode_agent(conn.execute("SELECT * FROM agents WHERE id=?", (agent_id,)).fetchone()) if agent_id else None
     tokens = conn.execute("SELECT COALESCE(SUM(input_tokens+output_tokens), 0) AS total FROM stage_runs WHERE task_id=?", (task["id"],)).fetchone()
     task["total_tokens"] = tokens["total"]
@@ -175,8 +176,8 @@ async def create_task(data: TaskCreate) -> dict[str, Any]:
         ).fetchone())
         timestamp = now()
         cursor = conn.execute(
-            "INSERT INTO tasks(title, description, external_issue_id, current_stage, status, branch_name, stage_agents, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (data.title, data.description, data.external_issue_id, 0 if blocked else 1, "blocked_main" if blocked else "queued", "pending", dumps(assignments), timestamp, timestamp),
+            "INSERT INTO tasks(title, description, external_issue_id, milestone, sprint, current_stage, status, branch_name, stage_agents, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (data.title, data.description, data.external_issue_id, data.milestone, data.sprint, 0 if blocked else 1, "blocked_main" if blocked else "queued", "pending", dumps(assignments), timestamp, timestamp),
         )
         task_id = cursor.lastrowid
         conn.execute("UPDATE tasks SET branch_name=? WHERE id=?", (f"feat/task-{task_id}", task_id))
@@ -207,8 +208,8 @@ def update_task(task_id: int, data: TaskUpdate) -> dict[str, Any]:
         validate_agent_assignments(conn, data.stage_agents)
         assignments = {str(k): v for k, v in data.stage_agents.items()}
         conn.execute(
-            "UPDATE tasks SET title=?, description=?, external_issue_id=?, stage_agents=?, updated_at=? WHERE id=?",
-            (data.title, data.description, data.external_issue_id, dumps(assignments), now(), task_id),
+            "UPDATE tasks SET title=?, description=?, external_issue_id=?, milestone=?, sprint=?, stage_agents=?, updated_at=? WHERE id=?",
+            (data.title, data.description, data.external_issue_id, data.milestone, data.sprint, dumps(assignments), now(), task_id),
         )
         conn.execute("DELETE FROM task_dependencies WHERE task_id=?", (task_id,))
         for dependency in data.dependencies:
@@ -224,6 +225,7 @@ def delete_task(task_id: int) -> None:
     get_task(task_id)
     with connect() as conn:
         conn.execute("DELETE FROM tasks WHERE id=?", (task_id,))
+    shutil.rmtree(settings.storage_dir / "tasks" / str(task_id), ignore_errors=True)
 
 
 @app.get("/api/tasks/{task_id}/artifacts")
@@ -333,6 +335,45 @@ async def test_yougile() -> dict[str, bool]:
     except YougileError as exc:
         raise HTTPException(502, str(exc))
     return {"ok": True}
+
+
+@app.post("/api/integrations/yougile/import")
+async def import_yougile_tasks() -> dict[str, int]:
+    saved = integration_settings()
+    project = saved.get("yougile_project", "").strip()
+    board = saved.get("yougile_board", "").strip()
+    if not project or not board:
+        raise HTTPException(400, "Укажите название проекта и имя доски Yougile")
+    try:
+        items = await fetch_import_tasks(project, board, saved.get("yougile_sticker", "").strip())
+    except YougileError as exc:
+        raise HTTPException(502, str(exc))
+    imported = updated = skipped = 0
+    team_url = (saved.get("yougile_team_url") or IntegrationSettings().yougile_team_url).rstrip("/")
+    for item in items:
+        issue_url = f"{team_url}/#{item['key']}" if item.get("key") else ""
+        with transaction() as conn:
+            existing = conn.execute("SELECT id, status FROM tasks WHERE external_issue_id=?", (item["id"],)).fetchone()
+            timestamp = now()
+            if existing and existing["status"] != "open":
+                skipped += 1
+                continue
+            if existing:
+                task_id = existing["id"]
+                conn.execute("UPDATE tasks SET title=?, description=?, external_issue_key=?, external_issue_url=?, updated_at=? WHERE id=?", (item["title"], item["description"], item.get("key", ""), issue_url, timestamp, task_id))
+                updated += 1
+            else:
+                cursor = conn.execute(
+                    "INSERT INTO tasks(title, description, external_issue_id, external_issue_key, external_issue_url, current_stage, status, branch_name, stage_agents, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 1, 'open', 'pending', ?, ?, ?)",
+                    (item["title"], item["description"], item["id"], item.get("key", ""), issue_url, dumps(default_stage_agents(conn)), timestamp, timestamp),
+                )
+                task_id = cursor.lastrowid
+                conn.execute("UPDATE tasks SET branch_name=? WHERE id=?", (f"feat/task-{task_id}", task_id))
+                imported += 1
+        directory = task_dir(task_id)
+        (directory / "00_task.md").write_text(f"# {item['title']}\n\n{item['description']}", encoding="utf-8")
+        (directory / "00_yougile_chat.md").write_text(item["chat"], encoding="utf-8")
+    return {"imported": imported, "updated": updated, "skipped": skipped, "total": len(items)}
 
 
 @app.post("/api/integrations/yougile/webhook")

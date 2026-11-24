@@ -1,6 +1,7 @@
 import { Check, ExternalLink, FileText, Flame, FolderGit2, Play, RotateCcw, Send, TerminalSquare } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
+import TaskDescription from './TaskDescription';
 import { api, fmtTokens, stageName } from './api';
 import { Artifact, Task } from './types';
 
@@ -41,6 +42,7 @@ export default function Inspector({ task, stage, reload, notify }: { task: Task;
   let json: { status?: string; summary?: string; comments?: string[]; questions?: string[] } | null = null;
   if (selected.endsWith('.json')) { try { json = JSON.parse(content); } catch { json = null; } }
   return <div className="p-5">
+    <TaskDescription task={task}/>
     <div className="mb-5"><div className="mb-1 text-[10px] uppercase tracking-widest text-indigo-400">Инспектор · этап {stage}</div><h2 className="text-base font-semibold">{stageName(stage)}</h2></div>
     <section className="mb-5 space-y-2 text-[11px]">
       <h3 className="mb-2 font-medium text-slate-300">Пути и ссылки</h3>

@@ -73,7 +73,7 @@ python worker/unity_worker.py \
 - `POST /api/webhooks/tracker` — Yougile `chat_message-created`; UUID чата/задачи читается из `data.chatId`, текст ответа — из `data.text`, доступ проверяется по `token` в query-параметре.
 - `WS /ws/worker` — заголовок `Authorization: Bearer ...`, heartbeat каждые 10 секунд.
 
-Yougile подключается через REST API v2. На вкладке «Настройки» введите API key, сохраните настройки и нажмите «Проверить подключение». В поле внешней задачи оркестратора укажите UUID задачи Yougile: вопросы бота публикуются в её чат. Для автоматических ответов задайте `ORCHESTRATOR_PUBLIC_URL` с публичным HTTPS-адресом сервера, укажите Tracker webhook secret и нажмите «Создать webhook». Yougile не может отправлять события на `localhost` из WSL; в этом случае используйте HTTPS reverse proxy/туннель или ручной ответ в инспекторе.
+Yougile подключается через REST API v2. На вкладке «Настройки» введите API key, сохраните настройки и нажмите «Проверить подключение». Укажите название проекта и имя доски, при необходимости — стикер в формате `Название.Состояние`, например `Development.Код`. Нажмите «Импортировать задачи»: задачи из колонок `Open` и `Ready` с выбранным состоянием стикера будут импортированы с описанием и историей чата (`00_yougile_chat.md`) в локальный статус `open`. Если стикер не указан, импортируются все задачи из этих колонок. Боты их не запускают. В списке отображается проектный номер Yougile вида `ZEL-17` со ссылкой на задачу (`URL команды/#ZEL-17`); UUID остаётся во внутреннем `external_issue_id` для API и webhook. Описание с форматированием выводится в правой панели графа задачи. В редакторе можно указать майлстон и спринт, например `Прототип` и `Спринт 1`; они отображаются цепочкой и сохраняются при повторном импорте. Повторный импорт обновляет только задачи, которые всё ещё остаются в `open`, и не создаёт дубликаты. В поле внешней задачи оркестратора вручную укажите UUID задачи Yougile: вопросы бота публикуются в её чат. Для автоматических ответов задайте `ORCHESTRATOR_PUBLIC_URL` с публичным HTTPS-адресом сервера, укажите Tracker webhook secret и нажмите «Создать webhook». Yougile не может отправлять события на `localhost` из WSL; в этом случае используйте HTTPS reverse proxy/туннель или ручной ответ в инспекторе.
 
 Переменные окружения задаются в `.env` (см. `.env.example`). Настройки, введенные в UI, имеют приоритет над webhook/worker-секретами окружения и сохраняются в SQLite; там же сохраняется Yougile API key. Используйте HTTPS/WSS и reverse proxy на публичном VDS.
 
@@ -83,7 +83,7 @@ Yougile подключается через REST API v2. На вкладке «�
 - `GET/POST /api/tasks`, `GET/PUT/DELETE /api/tasks/{id}`.
 - `GET /api/tasks/{id}/artifacts[/{name}]`, `GET /api/tasks/{id}/logs` (SSE).
 - `POST /api/tasks/{id}/answer`, `/restart?stage=N`, `/approve?stage=N`, `/merge`.
-- `GET/PUT /api/settings`, `POST /api/integrations/yougile/test`, `POST /api/integrations/yougile/webhook`, `GET /api/health`.
+- `GET/PUT /api/settings`, `POST /api/integrations/yougile/test`, `POST /api/integrations/yougile/import`, `POST /api/integrations/yougile/webhook`, `GET /api/health`.
 
 ## Тесты
 

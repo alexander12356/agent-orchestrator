@@ -9,7 +9,7 @@ export function Avatar({ agent, size = 32 }: { agent?: Agent | null; size?: numb
 }
 
 export function StageBadge({ task }: { task: Pick<Task, 'current_stage' | 'status'> }) {
-  const color = task.status === 'error' ? 'red' : task.status === 'waiting_answer' ? 'orange' : [ 'gray', 'yellow', 'blue', 'yellow', 'blue', 'purple', 'green' ][task.current_stage];
+  const color = task.status === 'error' ? 'red' : task.status === 'waiting_answer' ? 'orange' : task.status === 'open' ? 'gray' : [ 'gray', 'yellow', 'blue', 'yellow', 'blue', 'purple', 'green' ][task.current_stage];
   return <span className={`badge badge-${color}`}>{task.current_stage === 0 && '🔒'} {task.status === 'waiting_answer' && '❓'} {stageName(task.current_stage, task.status)}</span>;
 }
 

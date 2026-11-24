@@ -69,7 +69,7 @@ class Dispatcher:
     async def start(self, task_id: int) -> None:
         with connect() as conn:
             task = decode_task(conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone())
-            if not task or task["status"] in ("done", "blocked_main", "waiting_answer", "waiting_pr", "running"):
+            if not task or task["status"] in ("open", "done", "blocked_main", "waiting_answer", "waiting_pr", "running"):
                 return
         if settings.auto_start:
             await self.schedule()
@@ -268,6 +268,9 @@ class Dispatcher:
 
     async def restart(self, task_id: int, stage: int) -> None:
         with connect() as conn:
+            task = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if not task or task["status"] == "open":
+                return
             conn.execute("UPDATE tasks SET current_stage=?, status='queued', retry_count=retry_count+1, updated_at=? WHERE id=? AND merged_to_main=0", (stage, now(), task_id))
         self.active.pop(task_id, None)
         await self.start(task_id)
@@ -275,8 +278,10 @@ class Dispatcher:
     async def force_approve(self, task_id: int, stage: int) -> None:
         if stage not in (1, 2, 4):
             raise ValueError("Принудительно можно утвердить только этапы 1, 2 и 4")
-        next_stage, status = {1: (2, "queued"), 2: (3, "queued"), 4: (5, "waiting_pr")}[stage]
         with connect() as conn:
+            if conn.execute("SELECT 1 FROM tasks WHERE id=? AND status='open'", (task_id,)).fetchone():
+                return
+            next_stage, status = {1: (2, "queued"), 2: (3, "queued"), 4: (5, "waiting_pr")}[stage]
             conn.execute("UPDATE tasks SET current_stage=?, status=?, updated_at=? WHERE id=?", (next_stage, status, now(), task_id))
         await self.start(task_id)
 

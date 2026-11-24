@@ -27,7 +27,7 @@
 
 ### 3.1. Вкладка 1: «Задачи» (Таск-трекер и зависимости)
 
-Интерактивная таблица всех задач с фильтрами (Все, В работе, Ожидают, Готово к PR, Завершены), поиском и кнопкой + Новая задача.
+Интерактивная таблица всех задач с фильтрами (Все, Open, В работе, Ожидают, Готово к PR, Завершены), поиском и кнопкой + Новая задача. Задачу можно удалить кнопкой с корзиной после подтверждения; вместе с записью БД удаляются её локальные артефакты. Задачи, импортированные из колонок Yougile `Open` и `Ready`, получают локальный статус `Open`; боты их не запускают. Необязательный фильтр `Название.Состояние` (например, `Development.Код`) ограничивает импорт задачами с выбранным состоянием стикера. Описание сохраняется в ТЗ, история чата — в артефакт `00_yougile_chat.md`.
 
 **Столбцы таблицы:**
 
@@ -49,7 +49,8 @@
 
 **Модальное окно создания / редактирования задачи:**
 
-- Название и описание (ТЗ).
+- Название и описание (ТЗ); форматированное описание отображается в правой панели графа задачи.
+- Майлстон и спринт (например, `Прототип` → `Спринт 1`).
 - ID / ссылка на задачу во внешнем таск-трекере людей (необязательно, например PROJ-452).
 - Зависимости: Мультиселект-список существующих задач с кликабельными чекбоксами (с валидацией от циклических зависимостей).
 - Назначение ботов на этапы 1–4 (подставляются дефолтные из настроек, можно переопределить для конкретной задачи).
@@ -119,7 +120,7 @@
 
 - URL и Secret-токен для приёма Git-вебхуков (`POST /api/webhooks/git`).
 - URL и Secret-токен для приёма вебхуков от таск-трекера людей (`POST /api/webhooks/tracker`).
-- Настройки подключения к Yougile REST API v2 (API key, callback URL и Secret-токен webhook).
+- Настройки подключения к Yougile REST API v2 (API key, название проекта, имя доски, необязательный стикер `Название.Состояние`, импорт задач из колонок Open и Ready, callback URL и Secret-токен webhook).
 - Токен авторизации для подключения локального `unity_worker.py` по WebSocket.
 
 ## 4. Архитектура бэкенда и протоколы работы
@@ -151,7 +152,7 @@ orchestrator/
 ### 4.2. Схема базы данных (SQLite)
 
 1. `agents`: `id`, `name`, `avatar_url`, `role_prompt`, `concurrency_limit`, `primary_config` (JSON), `fallback_configs` (JSON array), `fallback_triggers` (JSON).
-2. `tasks`: `id`, `title`, `description`, `external_issue_id`, `current_stage` (0..6), `status` (`blocked_main`, `queued`, `running`, `waiting_answer`, `waiting_pr`, `done`, `error`), `branch_name`, `pr_url`, `merged_to_main` (bool), `retry_count`, `stage_agents` (JSON маппинг этапов 1–4 на `agent_id`), `created_at`.
+2. `tasks`: `id`, `title`, `description`, `external_issue_id` (UUID Yougile), `external_issue_key` (отображаемый номер вида ZEL-17), `external_issue_url`, `milestone`, `sprint`, `current_stage` (0..6), `status` (`open`, `blocked_main`, `queued`, `running`, `waiting_answer`, `waiting_pr`, `done`, `error`), `branch_name`, `pr_url`, `merged_to_main` (bool), `retry_count`, `stage_agents` (JSON маппинг этапов 1–4 на `agent_id`), `created_at`.
 3. `task_dependencies`: `task_id` (PK, FK), `depends_on_task_id` (PK, FK).
 4. `stage_runs`: `id`, `task_id`, `stage`, `attempt`, `agent_id`, `cli_used`, `model_used`, `is_fallback` (bool), `artifact_path`, `input_tokens`, `output_tokens`, `status`, `started_at`, `finished_at`.
 

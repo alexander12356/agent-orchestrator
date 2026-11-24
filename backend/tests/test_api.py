@@ -59,3 +59,15 @@ def test_tracker_answer(client, agent, monkeypatch):
     assert response.status_code == 202
     assert client.get(f"/api/tasks/{task['id']}").json()['status'] == 'queued'
     assert 'fixed timestep' in (settings.storage_dir / 'tasks' / str(task['id']) / '01_answers_v1.md').read_text()
+
+
+def test_delete_task_removes_database_record_and_artifacts(client, agent):
+    task = make_task(client, agent)
+    directory = settings.storage_dir / 'tasks' / str(task['id'])
+    (directory / 'artifact.md').write_text('artifact')
+
+    response = client.delete(f"/api/tasks/{task['id']}")
+
+    assert response.status_code == 204
+    assert client.get(f"/api/tasks/{task['id']}").status_code == 404
+    assert not directory.exists()
