@@ -70,12 +70,12 @@ python worker/unity_worker.py \
 Вкладка «Настройки» показывает готовые URL:
 
 - `POST /api/webhooks/git` — GitHub `pull_request`; принимаются только `merged=true` и base `main`, подпись `X-Hub-Signature-256`.
-- `POST /api/webhooks/tracker` — GitHub Issues (`issue.number`, `comment.body`) или универсальный JSON (`external_issue_id`, `answer`).
+- `POST /api/webhooks/tracker` — Yougile `chat_message-created`; UUID чата/задачи читается из `data.chatId`, текст ответа — из `data.text`, доступ проверяется по `token` в query-параметре.
 - `WS /ws/worker` — заголовок `Authorization: Bearer ...`, heartbeat каждые 10 секунд.
 
-GitHub Issues поддерживается напрямую. Jira, Linear, YouTrack используют универсальный HTTP POST `BASE_URL/issues/ID/comments` с Bearer token; при другом API адаптируйте `backend/app/tracker.py`. Ручные ответы и подтверждение merge доступны в инспекторе.
+Yougile подключается через REST API v2. На вкладке «Настройки» введите API key, сохраните настройки и нажмите «Проверить подключение». В поле внешней задачи оркестратора укажите UUID задачи Yougile: вопросы бота публикуются в её чат. Для автоматических ответов задайте `ORCHESTRATOR_PUBLIC_URL` с публичным HTTPS-адресом сервера, укажите Tracker webhook secret и нажмите «Создать webhook». Yougile не может отправлять события на `localhost` из WSL; в этом случае используйте HTTPS reverse proxy/туннель или ручной ответ в инспекторе.
 
-Переменные окружения задаются в `.env` (см. `.env.example`). Настройки, введенные в UI, имеют приоритет над webhook/worker-секретами окружения и сохраняются в SQLite. Используйте HTTPS/WSS и reverse proxy на публичном VDS.
+Переменные окружения задаются в `.env` (см. `.env.example`). Настройки, введенные в UI, имеют приоритет над webhook/worker-секретами окружения и сохраняются в SQLite; там же сохраняется Yougile API key. Используйте HTTPS/WSS и reverse proxy на публичном VDS.
 
 ## Основные API
 
@@ -83,7 +83,7 @@ GitHub Issues поддерживается напрямую. Jira, Linear, YouTr
 - `GET/POST /api/tasks`, `GET/PUT/DELETE /api/tasks/{id}`.
 - `GET /api/tasks/{id}/artifacts[/{name}]`, `GET /api/tasks/{id}/logs` (SSE).
 - `POST /api/tasks/{id}/answer`, `/restart?stage=N`, `/approve?stage=N`, `/merge`.
-- `GET/PUT /api/settings`, `GET /api/health`.
+- `GET/PUT /api/settings`, `POST /api/integrations/yougile/test`, `POST /api/integrations/yougile/webhook`, `GET /api/health`.
 
 ## Тесты
 

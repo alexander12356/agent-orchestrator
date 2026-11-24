@@ -8,6 +8,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,7 +20,7 @@ from .database import connect, decode_agent, decode_task, dumps, init_db, now, t
 from .dispatcher import dispatcher, task_dir
 from .events import bus
 from .schemas import AgentCreate, AgentUpdate, IntegrationSettings, ManualMerge, TaskCreate, TaskUpdate, TrackerAnswer
-from .tracker import integration_settings
+from .tracker import BOT_PREFIX, YougileError, ensure_webhook, integration_settings, test_connection
 from .worker_hub import hub
 
 
@@ -303,12 +304,16 @@ async def logs(task_id: int, request: Request) -> StreamingResponse:
 
 @app.get("/api/settings")
 def get_settings() -> dict[str, Any]:
+    defaults = IntegrationSettings().model_dump()
     saved = integration_settings()
+    values = {key: saved.get(key, value) for key, value in defaults.items()}
+    tracker_webhook_url = f"{settings.public_url.rstrip('/')}/api/webhooks/tracker"
+    if values["tracker_webhook_secret"]:
+        tracker_webhook_url += "?" + urlencode({"token": values["tracker_webhook_secret"]})
     return {
-        **IntegrationSettings().model_dump(),
-        **saved,
+        **values,
         "git_webhook_url": f"{settings.public_url}/api/webhooks/git",
-        "tracker_webhook_url": f"{settings.public_url}/api/webhooks/tracker",
+        "tracker_webhook_url": tracker_webhook_url,
         "worker_websocket_url": settings.public_url.replace("http", "ws", 1) + "/ws/worker",
     }
 
@@ -319,6 +324,33 @@ def save_settings(data: IntegrationSettings) -> dict[str, bool]:
         for key, value in data.model_dump().items():
             conn.execute("INSERT INTO settings(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
     return {"ok": True}
+
+
+@app.post("/api/integrations/yougile/test")
+async def test_yougile() -> dict[str, bool]:
+    try:
+        await test_connection()
+    except YougileError as exc:
+        raise HTTPException(502, str(exc))
+    return {"ok": True}
+
+
+@app.post("/api/integrations/yougile/webhook")
+async def register_yougile_webhook() -> dict[str, str]:
+    saved = integration_settings()
+    secret = saved.get("tracker_webhook_secret") or settings.tracker_webhook_secret
+    if not secret:
+        raise HTTPException(400, "Укажите Tracker webhook secret")
+    if not settings.public_url.startswith("https://"):
+        raise HTTPException(400, "Для Yougile webhook нужен публичный HTTPS ORCHESTRATOR_PUBLIC_URL")
+    callback_url = f"{settings.public_url.rstrip('/')}/api/webhooks/tracker?" + urlencode({"token": secret})
+    try:
+        webhook_id = await ensure_webhook(callback_url)
+    except YougileError as exc:
+        raise HTTPException(502, str(exc))
+    with connect() as conn:
+        conn.execute("INSERT INTO settings(key, value) VALUES ('yougile_webhook_id', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (webhook_id,))
+    return {"id": webhook_id}
 
 
 def verify_signature(secret: str, body: bytes, signature: str | None) -> None:
@@ -351,15 +383,21 @@ async def git_webhook(request: Request, x_hub_signature_256: str | None = Header
 
 
 @app.post("/api/webhooks/tracker")
-async def tracker_webhook(request: Request, x_hub_signature_256: str | None = Header(None)) -> dict[str, Any]:
-    body = await request.body()
+async def tracker_webhook(request: Request) -> dict[str, Any]:
     saved = integration_settings()
-    verify_signature(saved.get("tracker_webhook_secret") or settings.tracker_webhook_secret, body, x_hub_signature_256)
+    secret = saved.get("tracker_webhook_secret") or settings.tracker_webhook_secret
+    if secret and not secrets.compare_digest(request.query_params.get("token", ""), secret):
+        raise HTTPException(401, "Некорректный token webhook")
     payload = await request.json()
-    issue = str(payload.get("external_issue_id") or payload.get("issue", {}).get("number") or payload.get("issue", {}).get("id") or "")
-    answer = payload.get("answer") or payload.get("comment", {}).get("body") or payload.get("comment", {}).get("text")
+    if payload.get("event") != "chat_message-created":
+        return {"accepted": False}
+    data = payload.get("data", {})
+    issue = str(data.get("chatId") or data.get("taskId") or "")
+    answer = data.get("text")
     if not issue or not answer:
-        raise HTTPException(400, "Нужны external_issue_id/issue и answer/comment")
+        raise HTTPException(400, "В webhook Yougile нужны data.chatId и data.text")
+    if str(answer).startswith(BOT_PREFIX):
+        return {"accepted": False}
     with connect() as conn:
         row = conn.execute("SELECT id FROM tasks WHERE external_issue_id=? AND status='waiting_answer'", (issue,)).fetchone()
     if not row:

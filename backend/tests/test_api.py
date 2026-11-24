@@ -45,11 +45,16 @@ def test_signed_git_webhook(client, agent):
     assert client.get(f"/api/tasks/{task['id']}").json()['merged_to_main'] is True
 
 
-def test_tracker_answer(client, agent):
+def test_tracker_answer(client, agent, monkeypatch):
     task = make_task(client, agent)
     from app.database import connect
     with connect() as conn:
         conn.execute("UPDATE tasks SET status='waiting_answer' WHERE id=?", (task['id'],))
+
+    async def start(task_id):
+        pass
+
+    monkeypatch.setattr('app.main.dispatcher.start', start)
     response = client.post(f"/api/tasks/{task['id']}/answer", json={'answer': 'Use fixed timestep'})
     assert response.status_code == 202
     assert client.get(f"/api/tasks/{task['id']}").json()['status'] == 'queued'

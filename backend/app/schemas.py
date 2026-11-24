@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field
 
 
 CLI = Literal["claude", "codex", "gemini", "aider", "custom"]
@@ -69,15 +69,8 @@ class ManualMerge(BaseModel):
 
 
 class IntegrationSettings(BaseModel):
-    tracker_provider: Literal["github", "jira", "linear", "youtrack", "custom"] = "github"
-    tracker_base_url: str = ""
     tracker_api_token: str = ""
-    tracker_project: str = ""
-    git_webhook_secret: str = ""
     tracker_webhook_secret: str = ""
+    yougile_webhook_id: str = ""
+    git_webhook_secret: str = ""
     worker_token: str = ""
-
-    @model_validator(mode="after")
-    def normalize_urls(self):
-        self.tracker_base_url = self.tracker_base_url.rstrip("/")
-        return self

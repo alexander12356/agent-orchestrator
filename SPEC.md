@@ -119,7 +119,7 @@
 
 - URL и Secret-токен для приёма Git-вебхуков (`POST /api/webhooks/git`).
 - URL и Secret-токен для приёма вебхуков от таск-трекера людей (`POST /api/webhooks/tracker`).
-- Настройки подключения к таск-трекеру людей (провайдер: GitHub Issues / Jira / Linear / YouTrack / Custom API, Base URL, API Token).
+- Настройки подключения к Yougile REST API v2 (API key, callback URL и Secret-токен webhook).
 - Токен авторизации для подключения локального `unity_worker.py` по WebSocket.
 
 ## 4. Архитектура бэкенда и протоколы работы
