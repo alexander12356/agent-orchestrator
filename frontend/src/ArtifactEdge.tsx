@@ -9,7 +9,7 @@ export default function ArtifactEdge(props: EdgeProps) {
     <BaseEdge id={id} path={path} markerEnd={markerEnd} style={{ stroke: color, strokeWidth: selected ? 3 : 1.5 }}/>
     <path d={path} fill="none" stroke="transparent" strokeWidth={28} style={{ pointerEvents: 'stroke', cursor: 'pointer' }} onClick={event => { event.stopPropagation(); open?.(); }}/>
     <EdgeLabelRenderer>
-      <button type="button" aria-label={`Открыть артефакт: ${String(label)}`} onMouseDown={event => { event.stopPropagation(); open?.(); }} onClick={event => { event.stopPropagation(); open?.(); }} style={{
+      <button type="button" aria-label={`Открыть ревизию этапа: ${String(label)}`} onMouseDown={event => { event.stopPropagation(); open?.(); }} onClick={event => { event.stopPropagation(); open?.(); }} style={{
         position: 'absolute',
         zIndex: 1000,
         transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`,

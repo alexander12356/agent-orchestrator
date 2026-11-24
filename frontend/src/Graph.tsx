@@ -2,10 +2,10 @@ import { Background, Controls, Edge, Handle, MarkerType, Node, NodeProps, Positi
 import { Bot, CheckCircle2, FileCode2, Flame, GitPullRequest, RotateCcw, UserRound } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { fmtTokens, spentTokens, stageName } from './api';
-import { edgeArtifact } from './graphUtils';
 import { Avatar, Empty } from './components';
 import ArtifactEdge from './ArtifactEdge';
 import Inspector, { InspectorTab } from './Inspector';
+import RevisionWindow from './RevisionWindow';
 import { Agent, Task } from './types';
 
 const titles = ['Тех. документация', 'Ревью документации', 'Реализация', 'Ревью реализации', 'PR · Человек'];
@@ -27,13 +27,13 @@ const edgeTypes = { artifact: ArtifactEdge };
 
 export default function Graph({ task, tasks, agents, reload, selectTask, notify }: { task: Task; tasks: Task[]; agents: Agent[]; reload: () => void; selectTask: (id: number) => void; notify: (message: string) => void }) {
   const [selectedStage, setSelectedStage] = useState(Math.min(Math.max(task.current_stage, 1), 5));
-  const [requestedArtifact, setRequestedArtifact] = useState('');
   const [selectedEdge, setSelectedEdge] = useState('');
+  const [revisionEdge, setRevisionEdge] = useState<{ source: number; target: number } | null>(null);
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>('description');
   useEffect(() => {
     setSelectedStage(Math.min(Math.max(task.current_stage, 1), 5));
-    setRequestedArtifact('');
     setSelectedEdge('');
+    setRevisionEdge(null);
     setInspectorTab('description');
   }, [task.id]);
   const runs = task.runs || [];
@@ -45,10 +45,9 @@ export default function Graph({ task, tasks, agents, reload, selectTask, notify 
   const latest = (stage: number) => runs.filter(r => r.stage === stage && r.status === 'completed').at(-1);
   const openArtifactEdge = useCallback((id: string, source: number, target: number) => {
     setSelectedStage(source);
-    setRequestedArtifact(edgeArtifact(runs, source, target) || '');
     setSelectedEdge(id);
-    setInspectorTab('stage');
-  }, [runs]);
+    setRevisionEdge({ source, target });
+  }, []);
   const edges: Edge[] = useMemo(() => {
     const result: Edge[] = [];
     for (let i = 1; i <= 4; i++) {
@@ -66,8 +65,9 @@ export default function Graph({ task, tasks, agents, reload, selectTask, notify 
   return <main className="flex h-[calc(100vh-65px)] flex-col">
     <header className="flex items-center justify-between border-b border-slate-800 bg-slate-950/40 px-5 py-3"><div className="flex items-center gap-3"><GitPullRequest size={18} className="text-indigo-400"/><select className="!w-auto min-w-64 !border-0 !bg-transparent !py-1 text-sm font-medium" value={task.id} onChange={e => selectTask(Number(e.target.value))}>{tasks.map(t => <option key={t.id} value={t.id}>#{t.id} {t.title}</option>)}</select></div><span className="badge badge-orange"><Flame size={13}/>{fmtTokens(task.total_tokens)} токенов</span></header>
     <div className="grid min-h-0 flex-1 lg:grid-cols-[minmax(0,7fr)_minmax(330px,3fr)]">
-      <div className="relative min-h-[400px] border-r border-slate-800"><ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} fitView minZoom={.4} maxZoom={1.5} nodesDraggable={false} nodesConnectable={false} onNodeClick={(_, node) => { setSelectedStage(Number(node.id)); setRequestedArtifact(''); setSelectedEdge(''); setInspectorTab('stage'); }} onEdgeClick={(_, edge) => openArtifactEdge(edge.id, Number(edge.source), Number(edge.target))} colorMode="dark"><Background color="#1c2940" gap={24}/><Controls/></ReactFlow></div>
-      <aside className="scrollbar min-h-0 overflow-y-auto bg-[#0d1524]"><Inspector task={task} stage={selectedStage} requestedArtifact={requestedArtifact} tab={inspectorTab} onTabChange={setInspectorTab} reload={reload} notify={notify}/></aside>
+      <div className="relative min-h-[400px] border-r border-slate-800"><ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} fitView minZoom={.4} maxZoom={1.5} nodesDraggable={false} nodesConnectable={false} onNodeClick={(_, node) => { setSelectedStage(Number(node.id)); setSelectedEdge(''); setInspectorTab('stage'); }} onEdgeClick={(_, edge) => openArtifactEdge(edge.id, Number(edge.source), Number(edge.target))} colorMode="dark"><Background color="#1c2940" gap={24}/><Controls/></ReactFlow></div>
+      <aside className="scrollbar min-h-0 overflow-y-auto bg-[#0d1524]"><Inspector task={task} stage={selectedStage} tab={inspectorTab} onTabChange={setInspectorTab} reload={reload} notify={notify}/></aside>
     </div>
+    {revisionEdge && <RevisionWindow task={task} source={revisionEdge.source} target={revisionEdge.target} onClose={() => setRevisionEdge(null)}/>}
   </main>;
 }
