@@ -1,10 +1,12 @@
 import asyncio
+import json
 
 import httpx
 import pytest
 
 from app.config import settings
-from app.database import connect
+from app.database import connect, now
+from app.dispatcher import dispatcher, task_dir
 from app.tracker import BOT_PREFIX, ensure_webhook, fetch_import_tasks, publish_questions, test_connection as check_connection
 from conftest import make_task
 
@@ -57,7 +59,7 @@ def test_publish_questions_and_check_connection(client, monkeypatch):
     FakeClient.responses = [response(payload={'id': 1}), response(payload={'content': []})]
     monkeypatch.setattr('app.tracker.httpx.AsyncClient', FakeClient)
 
-    asyncio.run(publish_questions('task-uuid', ['First question', 'Second question']))
+    assert asyncio.run(publish_questions('task-uuid', ['First question', 'Second question'])) == 1
     asyncio.run(check_connection())
 
     method, url, request = FakeClient.requests[0]
@@ -127,25 +129,52 @@ def test_yougile_webhook_security_and_bot_filter(client):
     assert result.json()['accepted'] is False
 
 
-def test_yougile_webhook_accepts_answer(client, agent, monkeypatch):
+@pytest.mark.parametrize('reply_in_webhook', [True, False])
+def test_yougile_webhook_accepts_only_reply_to_current_question(client, agent, monkeypatch, reply_in_webhook):
     save_settings(client)
     task = make_task(client, agent)
     with connect() as conn:
-        conn.execute("UPDATE tasks SET external_issue_id='task-uuid', status='waiting_answer' WHERE id=?", (task['id'],))
+        conn.execute("UPDATE tasks SET external_issue_id='task-uuid' WHERE id=?", (task['id'],))
+        conn.execute("UPDATE stage_runs SET yougile_question_message_id=100 WHERE task_id=? AND stage=1 AND attempt=1", (task['id'],))
+        conn.execute(
+            "INSERT INTO stage_runs(task_id, stage, attempt, started_at) VALUES (?, 1, 2, ?)",
+            (task['id'], now()),
+        )
+
+    (task_dir(task['id']) / '01_questions_v2.json').write_text(json.dumps({'has_questions': True, 'questions': ['Which timestep?']}))
+    FakeClient.requests = []
+    FakeClient.responses = [response(payload={'id': 200})]
+    monkeypatch.setattr('app.tracker.httpx.AsyncClient', FakeClient)
+    asyncio.run(dispatcher._process_artifact(task['id'], 1, 2))
 
     async def start(task_id):
         pass
 
     monkeypatch.setattr('app.main.dispatcher.start', start)
-    result = client.post('/api/webhooks/tracker?token=webhook-secret', json={
-        'event': 'chat_message-created',
-        'data': {'chatId': 'task-uuid', 'text': 'Use fixed timestep'},
-    })
+    url = '/api/webhooks/tracker?token=webhook-secret'
+    data = {'chatId': 'task-uuid', 'text': 'Use fixed timestep'}
+    for properties in ({}, {'replyTo': 100}, {'replyTo': 300}):
+        result = client.post(url, json={'event': 'chat_message-created', 'data': {**data, 'properties': properties}})
+        assert result.json() == {'accepted': False}
+        assert client.get(f"/api/tasks/{task['id']}").json()['status'] == 'waiting_answer'
+
+    if reply_in_webhook:
+        data['properties'] = {'replyTo': 200}
+    else:
+        data['id'] = 201
+        FakeClient.requests = []
+        FakeClient.responses = [response(payload={'id': 201, 'properties': {'replyTo': 200}})]
+        monkeypatch.setattr('app.tracker.httpx.AsyncClient', FakeClient)
+
+    result = client.post(url, json={'event': 'chat_message-created', 'data': data})
 
     assert result.status_code == 200
     assert result.json() == {'accepted': True, 'task_id': task['id']}
     assert client.get(f"/api/tasks/{task['id']}").json()['status'] == 'queued'
-    assert 'fixed timestep' in (settings.storage_dir / 'tasks' / str(task['id']) / '01_answers_v1.md').read_text()
+    assert 'fixed timestep' in (settings.storage_dir / 'tasks' / str(task['id']) / '01_answers_v2.md').read_text()
+    if not reply_in_webhook:
+        assert FakeClient.requests[0][1] == 'https://yougile.com/api-v2/chats/task-uuid/messages/201'
+    assert client.post(url, json={'event': 'chat_message-created', 'data': data}).json() == {'accepted': False}
 
 
 def test_fetch_import_tasks_includes_descriptions_and_chats(client, monkeypatch):

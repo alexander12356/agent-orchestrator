@@ -550,7 +550,12 @@ class Dispatcher:
         if hold:
             await self._hold(task_id, hold_stage, hold)
         if issue_id:
-            await publish_questions(issue_id, questions["questions"])
+            message_id = await publish_questions(issue_id, questions["questions"])
+            with connect() as conn:
+                conn.execute(
+                    "UPDATE stage_runs SET yougile_question_message_id=? WHERE task_id=? AND stage=1 AND attempt=?",
+                    (message_id, task_id, attempt),
+                )
 
     async def worker_completed(self, message: dict[str, Any]) -> None:
         task_id = int(message["task_id"])
@@ -588,15 +593,26 @@ class Dispatcher:
         self.active.pop(task_id, None)
         await bus.publish(task_id, 3, error)
 
-    async def answer(self, task_id: int, answer: str) -> None:
-        with connect() as conn:
-            row = conn.execute("SELECT current_stage, status FROM tasks WHERE id=?", (task_id,)).fetchone()
+    async def answer(self, task_id: int, answer: str, *, yougile_reply: tuple[str, int] | None = None) -> bool:
+        with transaction() as conn:
+            row = conn.execute("SELECT status, external_issue_id FROM tasks WHERE id=?", (task_id,)).fetchone()
             if not row or row["status"] != "waiting_answer":
+                if yougile_reply is not None:
+                    return False
                 raise ValueError("Задача не ожидает ответа")
-            attempt = conn.execute("SELECT COALESCE(MAX(attempt), 1) AS n FROM stage_runs WHERE task_id=? AND stage=1", (task_id,)).fetchone()["n"]
+            run = conn.execute(
+                "SELECT attempt, yougile_question_message_id FROM stage_runs WHERE task_id=? AND stage=1 ORDER BY attempt DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            if yougile_reply is not None and (
+                run is None or yougile_reply != (row["external_issue_id"], run["yougile_question_message_id"])
+            ):
+                return False
+            attempt = run["attempt"] if run else 1
             (task_dir(task_id) / f"01_answers_v{attempt}.md").write_text(answer, encoding="utf-8")
             conn.execute("UPDATE tasks SET status='queued', updated_at=? WHERE id=?", (now(), task_id))
         await self.start(task_id)
+        return True
 
     async def start_task(self, task_id: int, stage: int | None = None, pipeline: bool = False) -> None:
         with transaction() as conn:

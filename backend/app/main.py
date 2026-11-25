@@ -22,7 +22,7 @@ from .dispatcher import dispatcher, limits, task_dir
 from .events import bus
 from .runner import present_log_line
 from .schemas import AgentCreate, AgentUpdate, IntegrationSettings, ManualMerge, TaskCreate, TaskUpdate, TrackerAnswer
-from .tracker import BOT_PREFIX, YougileError, ensure_webhook, fetch_import_tasks, integration_settings, test_connection
+from .tracker import BOT_PREFIX, YougileError, ensure_webhook, fetch_chat_message, fetch_import_tasks, integration_settings, test_connection
 from .worker_hub import hub
 
 
@@ -465,7 +465,18 @@ async def tracker_webhook(request: Request) -> dict[str, Any]:
         row = conn.execute("SELECT id FROM tasks WHERE external_issue_id=? AND status='waiting_answer'", (issue,)).fetchone()
     if not row:
         return {"accepted": False}
-    await dispatcher.answer(row["id"], str(answer))
+    reply_to = (data.get("properties") or {}).get("replyTo")
+    message_id = data.get("id")
+    if reply_to is None and type(message_id) is int and message_id > 0:
+        try:
+            message = await fetch_chat_message(issue, message_id)
+        except YougileError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        reply_to = (message.get("properties") or {}).get("replyTo")
+    if type(reply_to) is not int or reply_to <= 0:
+        return {"accepted": False}
+    if not await dispatcher.answer(row["id"], str(answer), yougile_reply=(issue, reply_to)):
+        return {"accepted": False}
     return {"accepted": True, "task_id": row["id"]}
 
 

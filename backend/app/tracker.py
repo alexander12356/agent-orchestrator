@@ -37,9 +37,10 @@ async def raise_for_status(response: httpx.Response) -> None:
         raise YougileError(f"Yougile API вернул ошибку HTTP {response.status_code}") from exc
 
 
-async def publish_questions(issue_id: str, questions: list[str]) -> None:
+async def publish_questions(issue_id: str, questions: list[str]) -> int:
     config = integration_settings()
     body = BOT_PREFIX + "\nВопросы по технической документации:\n\n" + "\n".join(f"{i}. {q}" for i, q in enumerate(questions, 1))
+    body += '\n\nОтправьте все ответы одним сообщением через «Ответить на это сообщение».'
     text_html = f"<p>{html.escape(body).replace(chr(10), '<br>')}</p>"
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -49,8 +50,29 @@ async def publish_questions(issue_id: str, questions: list[str]) -> None:
                 json={"text": body, "textHtml": text_html},
             )
             await raise_for_status(response)
+            message_id = response.json()["id"]
+            if type(message_id) is not int or message_id <= 0:
+                raise YougileError("Yougile вернул некорректный ID сообщения с вопросами")
+            return message_id
+    except (ValueError, KeyError, TypeError) as exc:
+        raise YougileError("Yougile не вернул ID сообщения с вопросами") from exc
     except httpx.HTTPError as exc:
         raise YougileError("Не удалось подключиться к Yougile API") from exc
+
+
+async def fetch_chat_message(issue_id: str, message_id: int) -> dict[str, Any]:
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(
+                f"{BASE_URL}/chats/{issue_id}/messages/{message_id}",
+                headers=headers(integration_settings()),
+            )
+            if response.status_code == 404:
+                return {}
+            await raise_for_status(response)
+            return response.json()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise YougileError("Не удалось прочитать сообщение Yougile") from exc
 
 
 async def test_connection() -> None:
