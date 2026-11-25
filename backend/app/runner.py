@@ -372,7 +372,10 @@ def extract_usage(output: str) -> dict[str, int | bool]:
             data = json.loads(line)
         except (json.JSONDecodeError, TypeError):
             continue
-        candidates = [data, data.get("usage", {}), data.get("result", {}).get("usage", {}) if isinstance(data.get("result"), dict) else {}]
+        if not isinstance(data, dict):
+            continue
+        result = data.get("result")
+        candidates = [data, data.get("usage"), result.get("usage") if isinstance(result, dict) else None]
         for usage in candidates:
             if not isinstance(usage, dict):
                 continue

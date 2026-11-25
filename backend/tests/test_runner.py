@@ -123,6 +123,12 @@ def test_extract_structured_usage():
     assert usage == {'input_tokens': 12, 'output_tokens': 8, 'cache_tokens': 3, 'estimated': False}
 
 
+def test_extract_usage_skips_non_object_output():
+    output = '{"result":{"usage":{"input_tokens":12,"output_tokens":8}}}\n42\nnull\n[]'
+    assert extract_usage(output) == {'input_tokens': 12, 'output_tokens': 8, 'cache_tokens': 0, 'estimated': False}
+    assert extract_usage('42') == {}
+
+
 def test_long_stream_lines_are_read_instead_of_failing(monkeypatch, tmp_path):
     script = tmp_path / 'big_line.py'
     script.write_text(
