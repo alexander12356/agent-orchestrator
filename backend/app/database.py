@@ -40,6 +40,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     stage_agents TEXT NOT NULL DEFAULT '{}',
     worktree_path TEXT,
     repository_url TEXT,
+    auto_retries INTEGER NOT NULL DEFAULT 0,
+    doc_returns INTEGER NOT NULL DEFAULT 0,
+    code_returns INTEGER NOT NULL DEFAULT 0,
+    hold_reason TEXT,
+    token_budget INTEGER,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -116,6 +121,15 @@ def init_db() -> None:
         for column in ("external_issue_key", "external_issue_url", "milestone", "sprint", "repository_url"):
             if column not in columns:
                 conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} TEXT")
+        for column, definition in (
+            ("auto_retries", "INTEGER NOT NULL DEFAULT 0"),
+            ("doc_returns", "INTEGER NOT NULL DEFAULT 0"),
+            ("code_returns", "INTEGER NOT NULL DEFAULT 0"),
+            ("hold_reason", "TEXT"),
+            ("token_budget", "INTEGER"),
+        ):
+            if column not in columns:
+                conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} {definition}")
         # A task that already reached the worker may have its old branch pushed to origin.
         legacy = conn.execute(
             "SELECT id, external_issue_key FROM tasks WHERE branch_name='feat/task-' || id AND NOT EXISTS (SELECT 1 FROM stage_runs WHERE task_id=tasks.id AND stage=3)"
@@ -155,4 +169,13 @@ def decode_task(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     result["stage_agents"] = {int(k): int(v) for k, v in json.loads(result["stage_agents"]).items()}
     result["merged_to_main"] = bool(result["merged_to_main"])
     result["repository_url"] = result.get("repository_url") or ""
+    for key in ("auto_retries", "doc_returns", "code_returns"):
+        result[key] = int(result.get(key) or 0)
     return result
+
+
+def spent_tokens(conn: sqlite3.Connection, task_id: int) -> int:
+    return conn.execute(
+        "SELECT COALESCE(SUM(input_tokens+output_tokens+cache_tokens), 0) AS total FROM stage_runs WHERE task_id=?",
+        (task_id,),
+    ).fetchone()["total"]

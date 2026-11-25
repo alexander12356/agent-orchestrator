@@ -17,8 +17,8 @@ from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import ROOT, settings
-from .database import branch_name, connect, decode_agent, decode_task, dumps, init_db, now, transaction
-from .dispatcher import dispatcher, task_dir
+from .database import branch_name, connect, decode_agent, decode_task, dumps, init_db, now, spent_tokens, transaction
+from .dispatcher import dispatcher, limits, task_dir
 from .events import bus
 from .runner import present_log_line
 from .schemas import AgentCreate, AgentUpdate, IntegrationSettings, ManualMerge, TaskCreate, TaskUpdate, TrackerAnswer
@@ -53,7 +53,7 @@ def get_task(task_id: int) -> dict[str, Any]:
     return decode_task(row)
 
 
-def task_view(task: dict[str, Any], conn: Any) -> dict[str, Any]:
+def task_view(task: dict[str, Any], conn: Any, default_budget: int = 0) -> dict[str, Any]:
     dependencies = conn.execute(
         "SELECT t.id, t.title, t.merged_to_main FROM task_dependencies d JOIN tasks t ON t.id=d.depends_on_task_id WHERE d.task_id=? ORDER BY t.id",
         (task["id"],),
@@ -61,8 +61,9 @@ def task_view(task: dict[str, Any], conn: Any) -> dict[str, Any]:
     task["dependencies"] = [dict(row) for row in dependencies]
     agent_id = task["stage_agents"].get(task["current_stage"]) if task["status"] != "open" else None
     task["current_agent"] = decode_agent(conn.execute("SELECT * FROM agents WHERE id=?", (agent_id,)).fetchone()) if agent_id else None
-    tokens = conn.execute("SELECT COALESCE(SUM(input_tokens+output_tokens+cache_tokens), 0) AS total FROM stage_runs WHERE task_id=?", (task["id"],)).fetchone()
-    task["total_tokens"] = tokens["total"]
+    task["total_tokens"] = spent_tokens(conn, task["id"])
+    # The budget the dispatcher enforces: the task's own, else the shared one.
+    task["token_budget_effective"] = int(task["token_budget"]) if task.get("token_budget") is not None else default_budget
     return task
 
 
@@ -157,12 +158,14 @@ async def upload_avatar(agent_id: int, file: UploadFile = File(...)) -> dict[str
 
 @app.get("/api/tasks")
 def list_tasks() -> list[dict[str, Any]]:
+    default_budget = limits()["task_token_budget"]
     with connect() as conn:
-        return [task_view(decode_task(row), conn) for row in conn.execute("SELECT * FROM tasks ORDER BY id DESC")]
+        return [task_view(decode_task(row), conn, default_budget) for row in conn.execute("SELECT * FROM tasks ORDER BY id DESC")]
 
 
 @app.post("/api/tasks", status_code=201)
 async def create_task(data: TaskCreate) -> dict[str, Any]:
+    default_budget = limits()["task_token_budget"]
     with transaction() as conn:
         validate_dependencies(conn, -1, data.dependencies)
         validate_agent_assignments(conn, data.stage_agents)
@@ -173,15 +176,15 @@ async def create_task(data: TaskCreate) -> dict[str, Any]:
         ).fetchone())
         timestamp = now()
         cursor = conn.execute(
-            "INSERT INTO tasks(title, description, external_issue_id, milestone, sprint, repository_url, current_stage, status, branch_name, stage_agents, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (data.title, data.description, data.external_issue_id, data.milestone, data.sprint, data.repository_url.strip(), 0 if blocked else 1, "blocked_main" if blocked else "queued", "pending", dumps(assignments), timestamp, timestamp),
+            "INSERT INTO tasks(title, description, external_issue_id, milestone, sprint, repository_url, current_stage, status, branch_name, stage_agents, token_budget, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (data.title, data.description, data.external_issue_id, data.milestone, data.sprint, data.repository_url.strip(), 0 if blocked else 1, "blocked_main" if blocked else "queued", "pending", dumps(assignments), data.token_budget, timestamp, timestamp),
         )
         task_id = cursor.lastrowid
         conn.execute("UPDATE tasks SET branch_name=? WHERE id=?", (branch_name(task_id), task_id))
         for dependency in data.dependencies:
             conn.execute("INSERT INTO task_dependencies VALUES (?, ?)", (task_id, dependency))
         row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-        task = task_view(decode_task(row), conn)
+        task = task_view(decode_task(row), conn, default_budget)
     directory = task_dir(task_id)
     (directory / "00_task.md").write_text(f"# {data.title}\n\n{data.description}", encoding="utf-8")
     await dispatcher.start(task_id)
@@ -191,8 +194,9 @@ async def create_task(data: TaskCreate) -> dict[str, Any]:
 @app.get("/api/tasks/{task_id}")
 def task_detail(task_id: int) -> dict[str, Any]:
     task = get_task(task_id)
+    default_budget = limits()["task_token_budget"]
     with connect() as conn:
-        result = task_view(task, conn)
+        result = task_view(task, conn, default_budget)
         result["runs"] = [dict(row) for row in conn.execute("SELECT * FROM stage_runs WHERE task_id=? ORDER BY id", (task_id,))]
     return result
 
@@ -200,19 +204,20 @@ def task_detail(task_id: int) -> dict[str, Any]:
 @app.put("/api/tasks/{task_id}")
 def update_task(task_id: int, data: TaskUpdate) -> dict[str, Any]:
     get_task(task_id)
+    default_budget = limits()["task_token_budget"]
     with transaction() as conn:
         validate_dependencies(conn, task_id, data.dependencies)
         validate_agent_assignments(conn, data.stage_agents)
         assignments = {str(k): v for k, v in data.stage_agents.items()}
         conn.execute(
-            "UPDATE tasks SET title=?, description=?, external_issue_id=?, milestone=?, sprint=?, repository_url=?, stage_agents=?, updated_at=? WHERE id=?",
-            (data.title, data.description, data.external_issue_id, data.milestone, data.sprint, data.repository_url.strip(), dumps(assignments), now(), task_id),
+            "UPDATE tasks SET title=?, description=?, external_issue_id=?, milestone=?, sprint=?, repository_url=?, stage_agents=?, token_budget=?, updated_at=? WHERE id=?",
+            (data.title, data.description, data.external_issue_id, data.milestone, data.sprint, data.repository_url.strip(), dumps(assignments), data.token_budget, now(), task_id),
         )
         conn.execute("DELETE FROM task_dependencies WHERE task_id=?", (task_id,))
         for dependency in data.dependencies:
             conn.execute("INSERT INTO task_dependencies VALUES (?, ?)", (task_id, dependency))
         row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-        result = task_view(decode_task(row), conn)
+        result = task_view(decode_task(row), conn, default_budget)
     task_dir(task_id).joinpath("00_task.md").write_text(f"# {data.title}\n\n{data.description}", encoding="utf-8")
     return result
 
@@ -321,6 +326,7 @@ def get_settings() -> dict[str, Any]:
         tracker_webhook_url += "?" + urlencode({"token": values["tracker_webhook_secret"]})
     return {
         **values,
+        **limits(),
         "git_webhook_url": f"{settings.public_url}/api/webhooks/git",
         "tracker_webhook_url": tracker_webhook_url,
         "worker_websocket_url": settings.public_url.replace("http", "ws", 1) + "/ws/worker",

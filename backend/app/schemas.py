@@ -54,6 +54,8 @@ class TaskBase(BaseModel):
     repository_url: str = ""
     dependencies: list[int] = []
     stage_agents: dict[int, int] = {}
+    # None takes the shared budget from the settings, 0 means no limit.
+    token_budget: int | None = Field(default=None, ge=0)
 
 
 class TaskCreate(TaskBase):
@@ -83,3 +85,6 @@ class IntegrationSettings(BaseModel):
     git_webhook_secret: str = ""
     worker_token: str = ""
     repository_url: str = ""
+    max_auto_retries: int = Field(default=2, ge=0, le=10)
+    max_returns: int = Field(default=3, ge=0, le=50)
+    task_token_budget: int = Field(default=0, ge=0)
