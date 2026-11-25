@@ -264,8 +264,9 @@ def resolve_executable(name: str) -> str:
     if found:
         return found
     candidates: list[Path] = []
-    if name == "codex":
-        candidates.extend(Path("/mnt/c/Users").glob("*/AppData/Local/OpenAI/Codex/bin/*/codex.exe"))
+    if name == "codex" and os.name != "nt":
+        # Server prompts and the workspace sandbox use paths in the Linux filesystem.
+        candidates.append(Path.home() / ".local" / "bin" / "codex")
     if name == "kimi":
         candidates.extend([
             Path("/home/paperclip/.local/bin/kimi"),

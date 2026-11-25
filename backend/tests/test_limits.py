@@ -181,7 +181,8 @@ def test_timeouts_rate_limits_and_missing_clis_are_not_retried(client, agent, id
     assert len(result['runs']) == 1
 
 
-def test_fallback_runs_only_after_a_failed_run(client, agent, idle, monkeypatch):
+@pytest.mark.parametrize("primary_failure", [RunResult(1, 'crash'), RunResult(0, 'no artifact')])
+def test_fallback_runs_only_after_a_failed_run(client, agent, idle, monkeypatch, primary_failure):
     backup = {'cli': 'custom', 'model': 'backup', 'environment': 'server', 'command': 'python backup.py'}
     assert client.put(f"/api/agents/{agent['id']}", json={**agent, 'fallback_configs': [backup]}).status_code == 200
 
@@ -194,7 +195,7 @@ def test_fallback_runs_only_after_a_failed_run(client, agent, idle, monkeypatch)
     assert result['runs'][0]['is_fallback'] == 0
 
     other = make_task(client, agent, 'With backup')
-    prompts = fake_runner(monkeypatch, [RunResult(1, 'crash'), writes('01_tech_doc_v1.md', '# Doc')])
+    prompts = fake_runner(monkeypatch, [primary_failure, writes('01_tech_doc_v1.md', '# Doc')])
     asyncio.run(dispatcher.run_stage(other['id'], 1))
     result = current(client, other['id'])
     assert (result['current_stage'], result['auto_retries'], len(prompts)) == (2, 0, 2)

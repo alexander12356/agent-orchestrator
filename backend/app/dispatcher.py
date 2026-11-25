@@ -458,13 +458,18 @@ class Dispatcher:
             if success:
                 break
             triggers = agent["fallback_triggers"]
+            # A missing artifact is a failed run even if the CLI returned zero.
             retry = (
                 (result.rate_limited and triggers.get("rate_limit", True))
                 or (result.timed_out and triggers.get("timeout", True))
-                or (result.exit_code != 0 and triggers.get("exit_code", True))
+                or triggers.get("exit_code", True)
             )
             if not retry or index == len(configs) - 1:
                 break
+            if result.exit_code == 127:
+                await log(result.output)
+            elif result.exit_code == 0 and not artifact.exists():
+                await log(f"CLI завершился без артефакта {artifact_name}.\n")
         assert result is not None
         status = "completed" if success else "error"
         error = None if success else describe_failure(result, artifact_name)
