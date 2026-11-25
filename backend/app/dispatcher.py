@@ -8,7 +8,7 @@ from typing import Any
 from .config import settings
 from .database import connect, decode_agent, decode_task, now, spent_tokens, transaction
 from .events import bus
-from .repo import RepoError, export_task_files, prepare_checkout, repository_url
+from .repo import RepoError, prepare_checkout, repository_url
 from .runner import ProcessRunner, RunResult, signal_cli
 from .schemas import IntegrationSettings
 from .tracker import find_reply, integration_settings, publish_questions
@@ -41,11 +41,6 @@ def task_dir(task_id: int) -> Path:
     path = settings.storage_dir / "tasks" / str(task_id)
     (path / "logs").mkdir(parents=True, exist_ok=True)
     return path
-
-
-def read_artifact(task_id: int, name: str) -> str:
-    path = task_dir(task_id) / name
-    return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
 def latest_version(directory: Path, pattern: str) -> Path | None:
@@ -291,22 +286,25 @@ class Dispatcher:
         else:
             await bus.publish(task_id, stage, f"Ошибка: {message}\n")
 
-    def _prompt(self, task: dict[str, Any], agent: dict[str, Any], stage: int, attempt: int, evidence: list[str] | None = None, missing: list[str] | None = None, repository_ref: str = "", previous_error: str = "") -> str:
+    def _prompt(self, task: dict[str, Any], agent: dict[str, Any], stage: int, attempt: int, *,
+                checkout: tuple[Path, str, str] | None = None, previous_error: str = "") -> str:
         directory = task_dir(task["id"])
         artifact = directory / STAGE_FILES[stage].format(attempt=attempt)
         inputs = [f"ТЗ: {directory / '00_task.md'}"]
         chat = directory / "00_yougile_chat.md"
         if chat.is_file():
             inputs.append(f"Чат задачи: {chat}")
-        if evidence is not None:
-            lines = [f"Снимок {repository_ref}: {directory / 'repo'}. Пути относительно снимка:"]
-            lines.extend(f"- {name}" for name in evidence)
-            if missing:
-                lines.append("В снимке нет: " + ", ".join(missing))
-            inputs.append("\n".join(lines))
+        if checkout:
+            repository, ref, commit = checkout
+            inputs.append(
+                f"Локальный checkout репозитория: {repository}\n"
+                f"Ветка {ref}, коммит {commit}. Используй этот каталог только для чтения. "
+                "Самостоятельно найди в нём исходники, тесты и данные для задачи. "
+                "Проверяй контракты по файлам выбранного коммита перед тем, как задавать вопросы о недостающих сведениях."
+            )
         inputs.append(
-            "Используй указанные артефакты и нужные для задачи файлы из списка снимка. "
-            "Отметь недостающие сведения. Не открывай GitHub, другие каталоги сервера, чужие задачи и базу."
+            "Используй указанные артефакты. Отметь недостающие сведения. "
+            "Не открывай GitHub, другие каталоги сервера, чужие задачи и базу."
         )
         doc = latest_version(directory, "01_tech_doc_v*.md")
         if stage == 1:
@@ -372,7 +370,7 @@ class Dispatcher:
                     inputs.append(f"Утверждённый техдокумент: {doc}")
                 previous = latest_version(directory, "04_code_review_v*.json")
                 check = (
-                    "Сверь реализацию в снимке с ТЗ и утверждённым документом. Отчёт используй как указатель на изменения и проверки. "
+                    "Сверь реализацию в checkout с ТЗ и утверждённым документом. Отчёт используй как указатель на изменения и проверки. "
                     "Сверь результат с приёмкой в сценариях. Для UI проверь достижимость действия через рабочий интерфейс. "
                     "Ищи нарушения требований, регрессии и достижимые дефекты, в том числе в Unity lifecycle и обработке null."
                 )
@@ -411,32 +409,25 @@ class Dispatcher:
 
         url = repository_url(task, integration_settings().get("repository_url", ""))
         await log("Читаю удаленный репозиторий задачи…\n" if url else "Агент запущен\n")
-        evidence: list[str] | None = None
-        missing: list[str] = []
-        repository_ref = ""
+        checkout = None
+        env = {"ORCHESTRATOR_TASK_ID": str(task["id"]), "ORCHESTRATOR_STAGE": str(stage)}
         if url and task["id"] not in self.stop_requested:
             try:
-                repository, repository_ref = await asyncio.to_thread(prepare_checkout, url, task["id"], task["branch_name"], task.get("external_issue_id") or "")
-                source = "\n".join(filter(None, [
-                    task.get("title"),
-                    task.get("description"),
-                    task.get("external_issue_key"),
-                    read_artifact(task["id"], "00_task.md"),
-                    read_artifact(task["id"], "00_yougile_chat.md"),
-                ]))
-                evidence, missing = await asyncio.to_thread(export_task_files, repository, directory / "repo", source)
+                checkout = await asyncio.to_thread(
+                    prepare_checkout, url, task["id"], task["branch_name"], task.get("external_issue_id") or ""
+                )
             except RepoError as exc:
                 await log(f"Репозиторий задачи недоступен: {exc}\n")
                 raise
-            await log(f"Снимок ветки {repository_ref}. В выдачу: {', '.join(evidence) or 'ничего'}\n")
-            if missing:
-                await log(f"В снимке нет: {', '.join(missing)}\n")
+            repository, ref, commit = checkout
+            env["ORCHESTRATOR_REPO"] = str(repository)
+            await log(f"Локальный checkout ветки {ref}, коммит {commit}: {repository}\n")
         if task["id"] in self.stop_requested:
             return
         if url:
             await log("Агент запущен\n")
         previous_error = self._previous_error(task["id"], stage, attempt) if task["auto_retries"] else ""
-        prompt = self._prompt(task, agent, stage, attempt, evidence, missing, repository_ref, previous_error)
+        prompt = self._prompt(task, agent, stage, attempt, checkout=checkout, previous_error=previous_error)
         artifact_name = STAGE_FILES[stage].format(attempt=attempt)
         artifact = directory / artifact_name
 
@@ -455,7 +446,7 @@ class Dispatcher:
                 config,
                 prompt,
                 directory,
-                {"ORCHESTRATOR_TASK_ID": str(task["id"]), "ORCHESTRATOR_STAGE": str(stage)},
+                env,
                 agent["fallback_triggers"].get("timeout_minutes", 20),
             )
             if task["id"] in self.stop_requested:

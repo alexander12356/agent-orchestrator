@@ -1,7 +1,5 @@
 import hashlib
 import os
-import re
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -16,111 +14,11 @@ def repository_url(task: dict, configured: str = "") -> str:
     return str(task.get("repository_url") or configured or "").strip()
 
 
-TEXT_SUFFIXES = {".md", ".txt", ".cs", ".json", ".yml", ".yaml", ".asmdef", ".xml"}
-MAX_EXPORT_FILES = 40
-MAX_EXPORT_BYTES = 200_000
-ISSUE_RE = re.compile(r"\b[A-Z][A-Z0-9]+-\d+\b")
-PATH_RE = re.compile(r"(?<![\w@])((?:[A-Za-z0-9_.-]+/)+[A-Za-z0-9_.-]+/?)")
-BLOB_RE = re.compile(r"blob/[0-9a-fA-F]{7,40}/([^\s)#]+)")
-
-
-def export_task_files(checkout: Path, destination: Path, text: str) -> tuple[list[str], list[str]]:
-    names = set(_tracked_files(checkout))
-    chosen: list[str] = []
-    missing: list[str] = []
-
-    def add_file(relative: str) -> bool:
-        relative = relative.strip().lstrip("./")
-        if not relative or relative in chosen or len(chosen) >= MAX_EXPORT_FILES:
-            return False
-        if relative not in names:
-            return False
-        path = checkout / relative
-        if not path.is_file() or path.stat().st_size > MAX_EXPORT_BYTES:
-            return False
-        if path.suffix.lower() not in TEXT_SUFFIXES and path.name != "AGENTS.md":
-            return False
-        target = destination / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, target)
-        chosen.append(relative)
-        return True
-
-    def add_tree(prefix: str) -> bool:
-        prefix = prefix.strip().lstrip("./")
-        if prefix and not prefix.endswith("/"):
-            prefix += "/"
-        matched = sorted(name for name in names if name.startswith(prefix))
-        added = False
-        for name in matched:
-            if add_file(name):
-                added = True
-            if len(chosen) >= MAX_EXPORT_FILES:
-                break
-        return added
-
-    if destination.exists():
-        shutil.rmtree(destination)
-    destination.mkdir(parents=True, exist_ok=True)
-    if not add_file("AGENTS.md"):
-        missing.append("AGENTS.md")
-    for name in _changed_files(checkout):
-        add_file(name)
-    for key in sorted(set(ISSUE_RE.findall(text))):
-        matches = sorted(name for name in names if key in name and (name.startswith("Docs/") or name.endswith(".md")))
-        if not matches:
-            missing.append(key)
-            continue
-        for name in matches[:6]:
-            add_file(name)
-    for mention in _mentioned_paths(text):
-        if mention in chosen:
-            continue
-        if mention in names:
-            if not add_file(mention):
-                missing.append(mention)
-            continue
-        prefix = mention if mention.endswith("/") else f"{mention}/"
-        if any(name.startswith(prefix) for name in names):
-            add_tree(prefix)
-            continue
-        if mention.startswith(("Docs/", "Assets/", "Packages/", "ProjectSettings/")) or mention == "AGENTS.md":
-            missing.append(mention.rstrip("/"))
-    if not chosen and destination.exists():
-        shutil.rmtree(destination, ignore_errors=True)
-    return chosen, missing
-
-
-def _mentioned_paths(text: str) -> list[str]:
-    found: list[str] = []
-    for pattern in (BLOB_RE, PATH_RE):
-        for match in pattern.finditer(text):
-            path = match.group(1).strip("`").rstrip(").,;\"'")
-            if ".." in path.split("/") or path in found:
-                continue
-            found.append(path)
-    return found
-
-
-def _tracked_files(checkout: Path) -> list[str]:
-    output = _git(["ls-tree", "-r", "--name-only", "HEAD"], checkout)
-    return [line for line in output.splitlines() if line]
-
-
-def _changed_files(checkout: Path) -> list[str]:
-    for base in ("main", "master"):
-        try:
-            output = _git(["diff", "--name-only", base, "HEAD"], checkout)
-        except RepoError:
-            continue
-        return [line for line in output.splitlines() if line]
-    return []
-
-
-def prepare_checkout(url: str, task_id: int, branch: str, external_id: str = "") -> tuple[Path, str]:
+def prepare_checkout(url: str, task_id: int, branch: str, external_id: str = "") -> tuple[Path, str, str]:
     ref = _select_branch(url, branch, external_id)
     mirror = _ensure_mirror(url)
     _git(["fetch", "--depth", "50", "origin", f"+refs/heads/{ref}:refs/heads/{ref}"], mirror)
+    commit = _git(["rev-parse", f"refs/heads/{ref}^{{commit}}"], mirror).strip()
     if ref not in {"main", "master"}:
         for base in ("main", "master"):
             try:
@@ -131,11 +29,11 @@ def prepare_checkout(url: str, task_id: int, branch: str, external_id: str = "")
     checkout = settings.storage_dir / "checkouts" / str(task_id)
     checkout.parent.mkdir(parents=True, exist_ok=True)
     if (checkout / ".git").exists():
-        _git(["reset", "--hard", ref], checkout)
+        _git(["reset", "--hard", commit], checkout)
         _git(["clean", "-fd"], checkout)
     else:
-        _git(["worktree", "add", "--detach", str(checkout), ref], mirror)
-    return checkout, ref
+        _git(["worktree", "add", "--detach", str(checkout), commit], mirror)
+    return checkout, ref, commit
 
 
 def _select_branch(url: str, branch: str, external_id: str) -> str:

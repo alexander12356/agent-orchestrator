@@ -106,17 +106,20 @@ def test_document_review_uses_current_scenario_format(client, agent, idle):
     assert "Прошлые замечания оцени по актуальному формату" in prompt
 
 
-def test_code_review_prompt_uses_snapshot_and_approved_document(client, agent, idle):
+def test_code_review_prompt_uses_checkout_and_approved_document(client, agent, idle, tmp_path):
     task = make_task(client, agent)
     directory = task_dir(task['id'])
     (directory / '01_tech_doc_v1.md').touch()
     (directory / '03_impl_report_v1.md').touch()
 
-    prompt = dispatcher._prompt(task, agent, 4, 1, evidence=['Assets/Game.cs'], repository_ref='task-1')
+    checkout = tmp_path / 'checkout'
+    commit = 'a' * 40
+    prompt = dispatcher._prompt(task, agent, 4, 1, checkout=(checkout, 'task-1', commit))
 
     assert f"Утверждённый техдокумент: {directory / '01_tech_doc_v1.md'}" in prompt
-    assert "- Assets/Game.cs" in prompt
-    assert "Сверь реализацию в снимке" in prompt
+    assert str(checkout) in prompt
+    assert f"Ветка task-1, коммит {commit}" in prompt
+    assert "Сверь реализацию в checkout" in prompt
     assert "проверь достижимость действия через рабочий интерфейс" in prompt
     assert '"notes": string[]' in prompt
     assert "через доступные GitHub" not in prompt

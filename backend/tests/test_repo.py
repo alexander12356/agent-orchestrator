@@ -1,10 +1,14 @@
+import asyncio
 import subprocess
 from pathlib import Path
 
 import pytest
 
 from app.config import settings
-from app.repo import RepoError, export_task_files, prepare_checkout
+from app.dispatcher import dispatcher
+from app.repo import RepoError, prepare_checkout
+from app.runner import RunResult
+from conftest import make_task
 
 
 def git(path: Path, *args: str) -> None:
@@ -28,8 +32,9 @@ def test_checkout_uses_task_branch_when_remote_has_it(tmp_path, monkeypatch):
     commit(origin, "FEATURE.md", "task")
     monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
 
-    checkout, ref = prepare_checkout(origin.as_uri(), 7, "feat/task-7")
+    checkout, ref, revision = prepare_checkout(origin.as_uri(), 7, "feat/task-7")
 
+    assert revision == subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=checkout, text=True).strip()
     assert ref == "feat/task-7"
     assert (checkout / "FEATURE.md").read_text(encoding="utf-8") == "task"
 
@@ -41,8 +46,9 @@ def test_checkout_uses_main_when_task_branch_is_absent(tmp_path, monkeypatch):
     commit(origin, "README.md", "main")
     monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
 
-    checkout, ref = prepare_checkout(origin.as_uri(), 8, "feat/task-8")
+    checkout, ref, revision = prepare_checkout(origin.as_uri(), 8, "feat/task-8")
 
+    assert revision == subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=checkout, text=True).strip()
     assert ref == "main"
     assert (checkout / "README.md").read_text(encoding="utf-8") == "main"
     assert not (checkout / "FEATURE.md").exists()
@@ -57,53 +63,48 @@ def test_checkout_uses_remote_branch_matching_external_task(tmp_path, monkeypatc
     commit(origin, "FEATURE.md", "card")
     monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
 
-    checkout, ref = prepare_checkout(origin.as_uri(), 10, "feat/task-10", "task-uuid")
+    checkout, ref, revision = prepare_checkout(origin.as_uri(), 10, "feat/task-10", "task-uuid")
 
+    assert revision == subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=checkout, text=True).strip()
     assert ref == "codex/zelya-task-uuid"
     assert (checkout / "FEATURE.md").read_text(encoding="utf-8") == "card"
 
 
-def test_export_keeps_only_files_named_by_the_task(tmp_path, monkeypatch):
+def test_server_agent_receives_full_checkout_and_separate_artifact_dir(client, agent, tmp_path, monkeypatch):
+    async def start_manually(task_id):
+        pass
+
+    monkeypatch.setattr(dispatcher, "start", start_manually)
     origin = tmp_path / "origin"
     origin.mkdir()
     git(origin, "init", "-b", "main")
-    commit(origin, "AGENTS.md", "rules")
-    commit(origin, "Docs/agent/drafts/ZEL-17.md", "draft")
-    commit(origin, "Docs/ZEL-15.md", "related")
-    commit(origin, "Assets/Scripts/Gameplay/Node.cs", "class Node {}")
-    commit(origin, "Assets/Art/hero.png", "not-text")
-    monkeypatch.setattr(settings, "storage_dir", tmp_path / "storage")
-    checkout, _ref = prepare_checkout(origin.as_uri(), 17, "feat/task-17")
+    commit(origin, "Assets/Windows/IWindowSystem.cs", "public interface IWindowSystem {}")
+    commit(origin, "Assets/Data/Catalog.asset", "Capacity: 2")
+    assert client.put("/api/settings", json={"repository_url": origin.as_uri()}).status_code == 200
+    task = make_task(client, agent)
+    seen = []
 
-    copied, missing = export_task_files(
-        checkout,
-        tmp_path / "repo",
-        "Нужны ZEL-17 и ZEL-15. Каталог Assets/Scripts/Gameplay/. Черновика ZEL-99 нет.",
-    )
+    class FakeRunner:
+        def __init__(self, **kwargs):
+            pass
 
-    assert copied[:3] == ["AGENTS.md", "Docs/ZEL-15.md", "Docs/agent/drafts/ZEL-17.md"]
-    assert "Assets/Scripts/Gameplay/Node.cs" in copied
-    assert "Assets/Art/hero.png" not in copied
-    assert missing == ["ZEL-99"]
-    assert (tmp_path / "repo" / "Docs" / "agent" / "drafts" / "ZEL-17.md").read_text(encoding="utf-8") == "draft"
+        async def run(self, config, prompt, cwd, env, timeout_minutes):
+            checkout = Path(env["ORCHESTRATOR_REPO"])
+            assert checkout != cwd
+            assert str(checkout) in prompt
+            assert (checkout / "Assets/Windows/IWindowSystem.cs").is_file()
+            assert (checkout / "Assets/Data/Catalog.asset").read_text(encoding="utf-8") == "Capacity: 2"
+            assert (cwd / "00_task.md").is_file()
+            (cwd / "01_tech_doc_v1.md").write_text("# Doc", encoding="utf-8")
+            seen.append(checkout)
+            return RunResult(0, "ok")
 
+    monkeypatch.setattr("app.dispatcher.ProcessRunner", FakeRunner)
+    asyncio.run(dispatcher.run_stage(task["id"], 1))
 
-def test_export_includes_files_changed_on_the_task_branch(tmp_path, monkeypatch):
-    origin = tmp_path / 'origin'
-    origin.mkdir()
-    git(origin, 'init', '-b', 'main')
-    commit(origin, 'AGENTS.md', 'rules')
-    commit(origin, 'README.md', 'main')
-    git(origin, 'checkout', '-b', 'feat/task-63')
-    commit(origin, 'Assets/Scripts/Gameplay/SessionTasks.cs', 'class SessionTasks {}')
-    commit(origin, 'Assets/Scripts/Gameplay/SessionTasks.cs.meta', 'guid: test')
-    monkeypatch.setattr(settings, 'storage_dir', tmp_path / 'storage')
-    checkout, _ref = prepare_checkout(origin.as_uri(), 63, 'feat/task-63')
-
-    copied, _missing = export_task_files(checkout, tmp_path / 'repo', 'Проверь реализацию задачи.')
-
-    assert 'Assets/Scripts/Gameplay/SessionTasks.cs' in copied
-    assert 'README.md' not in copied
+    result = client.get(f"/api/tasks/{task['id']}").json()
+    assert result["runs"][0]["status"] == "completed", result["runs"][0]["error"]
+    assert len(seen) == 1
 
 
 def test_missing_remote_branches_raise(tmp_path, monkeypatch):
