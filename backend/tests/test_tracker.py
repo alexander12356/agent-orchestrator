@@ -1,6 +1,7 @@
 import asyncio
 
 import httpx
+import pytest
 
 from app.config import settings
 from app.database import connect
@@ -89,10 +90,18 @@ def test_ensure_webhook_is_idempotent(client, monkeypatch):
     assert posts[0][2]['json'] == {'url': url, 'event': 'chat_message-created'}
 
 
-def test_register_webhook_endpoint(client, monkeypatch):
+@pytest.mark.parametrize('tracker_only', [False, True])
+def test_register_webhook_endpoint(client, monkeypatch, tracker_only):
     save_settings(client)
-    monkeypatch.setattr(settings, 'public_url', 'https://orchestrator.test')
+    public_url = 'http://localhost:8000' if tracker_only else 'https://orchestrator.test'
+    monkeypatch.setattr(settings, 'public_url', public_url)
+    monkeypatch.setattr(settings, 'tracker_webhook_public_url', 'https://orchestrator.test/' if tracker_only else '')
     monkeypatch.setattr('app.main.ensure_webhook', fake_webhook)
+
+    displayed = client.get('/api/settings').json()
+    assert displayed['tracker_webhook_url'] == 'https://orchestrator.test/api/webhooks/tracker?token=webhook-secret'
+    assert displayed['git_webhook_url'] == f'{public_url}/api/webhooks/git'
+    assert displayed['worker_websocket_url'] == public_url.replace('http', 'ws', 1) + '/ws/worker'
 
     result = client.post('/api/integrations/yougile/webhook')
 

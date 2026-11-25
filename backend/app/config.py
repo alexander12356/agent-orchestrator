@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     git_webhook_secret: str = "change-me-git-secret"
     tracker_webhook_secret: str = "change-me-tracker-secret"
     public_url: str = "http://localhost:8000"
+    tracker_webhook_public_url: str = ""
     auto_start: bool = True
 
     model_config = SettingsConfigDict(env_prefix="ORCHESTRATOR_", env_file=".env", extra="ignore")
@@ -20,6 +21,11 @@ class Settings(BaseSettings):
     @property
     def db_path(self) -> Path:
         return self.database_path or self.storage_dir / "orchestrator.db"
+
+    @property
+    def tracker_webhook_url(self) -> str:
+        base_url = self.tracker_webhook_public_url or self.public_url
+        return f"{base_url.rstrip('/')}/api/webhooks/tracker"
 
 
 settings = Settings()

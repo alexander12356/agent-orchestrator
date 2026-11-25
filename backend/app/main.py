@@ -326,7 +326,7 @@ def get_settings() -> dict[str, Any]:
     defaults = IntegrationSettings().model_dump()
     saved = integration_settings()
     values = {key: saved.get(key, value) for key, value in defaults.items()}
-    tracker_webhook_url = f"{settings.public_url.rstrip('/')}/api/webhooks/tracker"
+    tracker_webhook_url = settings.tracker_webhook_url
     if values["tracker_webhook_secret"]:
         tracker_webhook_url += "?" + urlencode({"token": values["tracker_webhook_secret"]})
     return {
@@ -404,9 +404,9 @@ async def register_yougile_webhook() -> dict[str, str]:
     secret = saved.get("tracker_webhook_secret") or settings.tracker_webhook_secret
     if not secret:
         raise HTTPException(400, "Укажите Tracker webhook secret")
-    if not settings.public_url.startswith("https://"):
-        raise HTTPException(400, "Для Yougile webhook нужен публичный HTTPS ORCHESTRATOR_PUBLIC_URL")
-    callback_url = f"{settings.public_url.rstrip('/')}/api/webhooks/tracker?" + urlencode({"token": secret})
+    if not settings.tracker_webhook_url.startswith("https://"):
+        raise HTTPException(400, "Для Yougile webhook нужен публичный HTTPS ORCHESTRATOR_TRACKER_WEBHOOK_PUBLIC_URL или ORCHESTRATOR_PUBLIC_URL")
+    callback_url = settings.tracker_webhook_url + "?" + urlencode({"token": secret})
     try:
         webhook_id = await ensure_webhook(callback_url)
     except YougileError as exc:
