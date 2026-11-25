@@ -77,17 +77,16 @@ def test_revision_prompt_names_previous_document_and_new_output(client, agent, i
     assert f"Предыдущая версия: {directory / '01_tech_doc_v1.md'}" in prompt
     assert f"Замечания ревью: {directory / '02_doc_review_v1.json'}" in prompt
     assert f"Запиши полный техдокумент в {directory / '01_tech_doc_v2.md'}" in prompt
-    sections = ['Что изменится', 'Сценарии использования', 'Как проверить', 'Реализация', 'Зависимости']
+    sections = ['Что изменится', 'Сценарии использования', 'Схема экрана', 'Реализация', 'Зависимости']
     positions = [prompt.index(f'«{section}»') for section in sections]
     assert positions == sorted(positions)
     assert "Сохрани согласованное поведение" in prompt
-    assert "Номера смежных задач указывай только здесь" in prompt
-    assert "кто вызывает операцию, когда и что получает" in prompt
-    assert prompt.index("«Ситуация»") < prompt.index("«Как код это обрабатывает»")
-    assert "обязательно добавь Mermaid" in prompt
-    assert "«имя функции — описание»" in prompt
-    assert "«Тест N — короткое название»" in prompt
-    assert "«Условия», «Действие», «Ожидаемый результат»" in prompt
+    assert "Приёмку описывай один раз в сценариях" in prompt
+    assert "«Как проверить»" not in prompt
+    assert "Mermaid block-beta" in prompt
+    assert "Mermaid flowchart" in prompt
+    assert "подпиши направленные стрелки" in prompt
+    assert "вызывающий компонент, вход и наблюдаемый эффект" in prompt
 
 
 def test_code_review_prompt_uses_snapshot_and_approved_document(client, agent, idle):
