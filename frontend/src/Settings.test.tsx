@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react';
+import { cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import Settings from './Settings';
 
@@ -16,9 +16,12 @@ const settings = {
   git_webhook_url: 'https://orchestrator.test/api/webhooks/git',
   tracker_webhook_url: 'https://orchestrator.test/api/webhooks/tracker',
   worker_websocket_url: 'wss://orchestrator.test/ws/worker',
+  max_auto_retries: 2,
+  max_returns: 3,
+  task_token_budget: 0,
 };
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
 describe('Yougile settings', () => {
   it('shows only Yougile tracker actions', async () => {
@@ -33,5 +36,14 @@ describe('Yougile settings', () => {
     expect(screen.getByRole('button', { name: 'Проверить подключение' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Создать webhook' })).toBeInTheDocument();
     expect(screen.queryByText(/Jira|Linear|YouTrack|Custom API/)).not.toBeInTheDocument();
+  });
+
+  it('shows the stage limits as numbers', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify(settings), { status: 200 })));
+    render(<Settings agents={[]} reload={vi.fn()} notify={vi.fn()}/>);
+
+    expect(await screen.findByLabelText('Автоповторы этапа')).toHaveValue(2);
+    expect(screen.getByLabelText('Лимит возвратов ревью')).toHaveValue(3);
+    expect(screen.getByLabelText('Бюджет токенов на задачу')).toHaveValue(0);
   });
 });

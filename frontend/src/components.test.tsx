@@ -15,4 +15,10 @@ describe('StageBadge', () => {
     render(<StageBadge task={{ current_stage: 6, status: 'done' }} />);
     expect(screen.getByText('Завершено')).toBeInTheDocument();
   });
+  it('asks for a person and explains why', () => {
+    render(<StageBadge task={{ current_stage: 2, status: 'needs_human', hold_reason: 'Ревью отклонило документацию 4 раз подряд' }} />);
+    const badge = screen.getByText(/Нужен человек \(этап 2\)/);
+    expect(badge).toHaveClass('badge-orange');
+    expect(badge).toHaveAttribute('title', 'Ревью отклонило документацию 4 раз подряд');
+  });
 });

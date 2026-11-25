@@ -86,5 +86,37 @@ describe('Bot assignment', () => {
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
     expect(body.stage_agents).toEqual({});
+    expect(body.token_budget).toBeNull();
+  });
+
+  it('saves the token budget of the task', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(task), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    render(<Tasks tasks={[task]} agents={[architect]} reload={vi.fn()} openTask={vi.fn()} onDeleted={vi.fn()} notify={vi.fn()}/>);
+
+    fireEvent.click(screen.getByTitle('Редактировать'));
+    fireEvent.change(screen.getByLabelText('Бюджет токенов'), { target: { value: '5000' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Сохранить задачу' }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    expect(JSON.parse(fetchMock.mock.calls[0][1]?.body as string).token_budget).toBe(5000);
+  });
+});
+
+describe('Task waiting for a person', () => {
+  it('is listed under Ожидают and continues instead of starting', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ ok: true }), { status: 202 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const reload = vi.fn();
+    render(<Tasks tasks={[{ ...task, current_stage: 2, status: 'needs_human', hold_reason: 'Бюджет токенов исчерпан' }]} agents={[architect]} reload={reload} openTask={vi.fn()} onDeleted={vi.fn()} notify={vi.fn()}/>);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Ожидают' }));
+    expect(screen.getByText('Imported task')).toBeInTheDocument();
+    expect(screen.queryByTitle('Запустить пайплайн')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTitle('Продолжить'));
+
+    await waitFor(() => expect(reload).toHaveBeenCalled());
+    expect(fetchMock).toHaveBeenCalledWith('/api/tasks/7/start', expect.objectContaining({ method: 'POST' }));
   });
 });

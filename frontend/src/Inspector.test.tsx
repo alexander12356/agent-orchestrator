@@ -1,7 +1,10 @@
-import { render, screen, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { api } from './api';
 import Inspector from './Inspector';
 import { Task } from './types';
+
+afterEach(() => cleanup());
 
 vi.mock('mermaid', () => ({
   default: {
@@ -49,5 +52,20 @@ describe('Inspector', () => {
   it('renders a mermaid diagram on the document tab', async () => {
     const { container } = render(<Inspector {...props} tab="document" />);
     await waitFor(() => expect(container.querySelector('svg.flowchart')).toBeTruthy());
+  });
+
+  it('explains why the task waits for a person and lets it continue', async () => {
+    const held = { ...task, current_stage: 2, status: 'needs_human', hold_reason: 'Ревью отклонило документацию 4 раз подряд' };
+    render(<Inspector {...props} task={held} stage={2} tab="description" />);
+    expect(screen.getByText('Ревью отклонило документацию 4 раз подряд')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Продолжить' }));
+
+    await waitFor(() => expect(api).toHaveBeenCalledWith('/tasks/7/start', expect.objectContaining({ method: 'POST' })));
+  });
+
+  it('offers nothing to continue for a running task', () => {
+    render(<Inspector {...props} tab="description" />);
+    expect(screen.queryByRole('button', { name: 'Продолжить' })).not.toBeInTheDocument();
   });
 });

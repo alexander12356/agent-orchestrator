@@ -8,9 +8,9 @@ export function Avatar({ agent, size = 32 }: { agent?: Agent | null; size?: numb
   return <span className="avatar" style={{ width: size, height: size }}>{value.startsWith('/') ? <img src={value} alt="" /> : value}</span>;
 }
 
-export function StageBadge({ task }: { task: Pick<Task, 'current_stage' | 'status'> }) {
-  const color = task.status === 'error' ? 'red' : task.status === 'waiting_answer' ? 'orange' : task.status === 'open' ? 'gray' : [ 'gray', 'yellow', 'blue', 'yellow', 'blue', 'purple', 'green' ][task.current_stage];
-  return <span className={`badge badge-${color}`}>{task.current_stage === 0 && '🔒'} {task.status === 'waiting_answer' && '❓'} {stageName(task.current_stage, task.status)}</span>;
+export function StageBadge({ task }: { task: Pick<Task, 'current_stage' | 'status' | 'hold_reason'> }) {
+  const color = task.status === 'error' ? 'red' : task.status === 'needs_human' || task.status === 'waiting_answer' ? 'orange' : task.status === 'open' ? 'gray' : [ 'gray', 'yellow', 'blue', 'yellow', 'blue', 'purple', 'green' ][task.current_stage];
+  return <span className={`badge badge-${color}`} title={task.hold_reason || undefined}>{task.current_stage === 0 && '🔒'} {task.status === 'waiting_answer' && '❓'} {task.status === 'needs_human' && '✋'} {stageName(task.current_stage, task.status)}</span>;
 }
 
 export function Modal({ title, children, onClose, wide = false }: { title: string; children: ReactNode; onClose: () => void; wide?: boolean }) {

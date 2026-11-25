@@ -1,4 +1,4 @@
-import { Check, ExternalLink, Flame, FolderGit2, RotateCcw, Send, TerminalSquare } from 'lucide-react';
+import { Check, ExternalLink, Flame, FolderGit2, Hand, Play, RotateCcw, Send, TerminalSquare } from 'lucide-react';
 import { memo, useEffect, useRef, useState } from 'react';
 import TaskDescription from './TaskDescription';
 import Markdown from './Markdown';
@@ -39,9 +39,9 @@ export default function Inspector({ task, stage, requestedArtifact: _requestedAr
     return () => source.close();
   }, [task.id, stage]);
   useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [logs]);
-  const action = async (kind: 'restart' | 'approve' | 'merge') => {
+  const action = async (kind: 'restart' | 'approve' | 'merge' | 'resume') => {
     setBusy(true);
-    try { await api(`/tasks/${task.id}/${kind}${kind === 'merge' ? '' : `?stage=${stage}`}`, { method: 'POST', body: kind === 'merge' ? '{}' : undefined }); notify(kind === 'restart' ? 'Текущая сессия остановлена, запущена новая' : kind === 'approve' ? 'Этап утвержден' : 'Merge подтвержден'); reload(); }
+    try { await api(kind === 'resume' ? `/tasks/${task.id}/start` : `/tasks/${task.id}/${kind}${kind === 'merge' ? '' : `?stage=${stage}`}`, { method: 'POST', body: kind === 'merge' ? '{}' : undefined }); notify(kind === 'restart' ? 'Текущая сессия остановлена, запущена новая' : kind === 'approve' ? 'Этап утвержден' : kind === 'resume' ? 'Задача продолжена' : 'Merge подтвержден'); reload(); }
     catch (e) { notify((e as Error).message); } finally { setBusy(false); }
   };
   const submitAnswer = async () => {
@@ -51,6 +51,7 @@ export default function Inspector({ task, stage, requestedArtifact: _requestedAr
   const runs = (task.runs || []).filter(r => r.stage === stage);
   return <div className="p-5">
     <div className="mb-5 flex border-b border-slate-800" role="tablist" aria-label="Инспектор задачи">{([['description', 'Описание'], ['stage', 'Этап'], ['document', 'Документ']] as [InspectorTab, string][]).map(([id, title]) => <button key={id} role="tab" aria-selected={tab === id} onClick={() => onTabChange(id)} className={`-mb-px border-b-2 px-3 py-2 text-xs transition ${tab === id ? 'border-indigo-400 text-indigo-300' : 'border-transparent text-slate-500 hover:text-slate-300'}`}>{title}</button>)}</div>
+    {task.status === 'needs_human' && <section className="mb-5 rounded-lg border border-amber-700/60 bg-amber-950/30 p-3 text-xs"><div className="flex items-start gap-2 text-amber-200"><Hand size={15} className="mt-0.5 shrink-0"/><div><b>Нужно решение человека</b>{task.hold_reason && <p className="mt-1 text-amber-200/80">{task.hold_reason}</p>}</div></div><button disabled={busy} className="btn btn-primary mt-3 w-full" onClick={() => action('resume')}><Play size={14}/>Продолжить</button></section>}
     {tab === 'description' && <div><TaskDescription task={task}/><section><h3 className="mb-3 text-xs font-medium text-slate-300">Чат Yougile</h3>{chat ? <div className="markdown text-xs leading-5 text-slate-400"><Markdown text={chatContent}/></div> : <p className="text-[11px] text-slate-600">Чат не импортирован</p>}</section></div>}
     {tab === 'document' && <DocumentView name={document?.name} content={documentContent}/>}
     {tab === 'stage' && <>
