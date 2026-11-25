@@ -76,6 +76,7 @@ def test_revision_prompt_names_previous_document_and_new_output(client, agent, i
 
     assert f"Предыдущая версия: {directory / '01_tech_doc_v1.md'}" in prompt
     assert f"Замечания ревью: {directory / '02_doc_review_v1.json'}" in prompt
+    assert "Замечания по прежнему формату сверяй со структурой ниже" in prompt
     assert f"Запиши полный техдокумент в {directory / '01_tech_doc_v2.md'}" in prompt
     sections = ['Что изменится', 'Сценарии использования', 'Схема экрана', 'Реализация', 'Зависимости']
     positions = [prompt.index(f'«{section}»') for section in sections]
@@ -89,6 +90,22 @@ def test_revision_prompt_names_previous_document_and_new_output(client, agent, i
     assert "вызывающий компонент, вход и наблюдаемый эффект" in prompt
 
 
+def test_document_review_uses_current_scenario_format(client, agent, idle):
+    task = make_task(client, agent)
+    directory = task_dir(task['id'])
+    (directory / '01_tech_doc_v2.md').touch()
+    (directory / '02_doc_review_v1.json').touch()
+
+    prompt = dispatcher._prompt(task, agent, 2, 2)
+
+    assert f"Документ: {directory / '01_tech_doc_v2.md'}" in prompt
+    assert f"Предыдущий вердикт: {directory / '02_doc_review_v1.json'}" in prompt
+    assert "Читай приёмку внутри сценариев" in prompt
+    assert "Отдельный раздел ручных проверок не требуется" in prompt
+    assert "Описание EventSystem и hit-test нужно только если ТЗ меняет этот путь" in prompt
+    assert "Прошлые замечания оцени по актуальному формату" in prompt
+
+
 def test_code_review_prompt_uses_snapshot_and_approved_document(client, agent, idle):
     task = make_task(client, agent)
     directory = task_dir(task['id'])
@@ -100,6 +117,7 @@ def test_code_review_prompt_uses_snapshot_and_approved_document(client, agent, i
     assert f"Утверждённый техдокумент: {directory / '01_tech_doc_v1.md'}" in prompt
     assert "- Assets/Game.cs" in prompt
     assert "Сверь реализацию в снимке" in prompt
+    assert "проверь достижимость действия через рабочий интерфейс" in prompt
     assert '"notes": string[]' in prompt
     assert "через доступные GitHub" not in prompt
 
