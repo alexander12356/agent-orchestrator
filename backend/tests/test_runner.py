@@ -1,6 +1,9 @@
 import asyncio
+import os
 import sys
 from pathlib import Path
+
+import pytest
 
 from app.runner import ProcessRunner, build_command, cli_environment, estimate_usage, extract_usage, present_log_line, rate_limited_line
 
@@ -158,6 +161,8 @@ def test_usage_fallback_is_marked_estimated():
 
 def test_limit_is_reported_only_by_error_lines():
     assert rate_limited_line("ERROR: You've hit your usage limit.")
+    assert rate_limited_line("ActionRequiredError: Weekly usage limit reached. It resets in 1 day.")
+    assert not rate_limited_line("ActionRequiredError: Please sign in.")
     assert rate_limited_line('[12:00:01] API Error: 429 Too Many Requests')
     assert rate_limited_line('{"type":"result","subtype":"success","is_error":true,"result":"usage limit reached"}')
     assert rate_limited_line('{"type":"error","message":"rate limit exceeded"}')
@@ -186,5 +191,27 @@ def test_limit_reported_by_a_failed_run_counts_even_on_a_plain_line(monkeypatch,
 
 def test_limit_on_an_error_line_stops_the_cli_at_once(monkeypatch, tmp_path):
     result = run_script(monkeypatch, tmp_path, "print('ERROR: rate limit exceeded', flush=True)\ntime.sleep(30)\n")
+    assert result.rate_limited is True
+    assert result.timed_out is False
+
+
+@pytest.mark.skipif(os.name != "posix", reason="The Linux runner manages a CLI process group")
+def test_cursor_limit_stops_launcher_children_holding_output(monkeypatch, tmp_path):
+    script = tmp_path / "cli.py"
+    script.write_text(
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        "print('ActionRequiredError: Weekly usage limit reached.', flush=True)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("app.runner.build_command", lambda *args, **kwargs: [sys.executable, str(script)])
+
+    async def run():
+        return await asyncio.wait_for(
+            ProcessRunner().run({"cli": "custom"}, "prompt", tmp_path, {}, 1),
+            timeout=3,
+        )
+
+    result = asyncio.run(run())
     assert result.rate_limited is True
     assert result.timed_out is False

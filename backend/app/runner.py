@@ -1,9 +1,11 @@
 import asyncio
+import contextlib
 import json
 import os
 import re
 import shlex
 import shutil
+import signal
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -12,13 +14,24 @@ RATE_LIMIT_RE = re.compile(r"rate.?limit|usage.?limit|quota exceeded|\b429\b|try
 # A plain text line has to read like a CLI error report before it is checked for a limit.
 ERROR_LINE_RE = re.compile(
     r"^(?:\W{0,3}|\[[^\]\n]{1,40}\]\s*|\d{2}:\d{2}(?::\d{2})?\W{1,3})"
-    r"(?:error|api\s*error|fatal|exception|traceback|uncaught|rate.?limit|usage.?limit|quota|too\s+many\s+requests|reconnecting|retrying)\b",
+    r"(?:error|api\s*error|ActionRequiredError|fatal|exception|traceback|uncaught|rate.?limit|usage.?limit|quota|too\s+many\s+requests|reconnecting|retrying)\b",
     re.I,
 )
 RATE_LIMIT_TAIL_LINES = 20
 KIMI_NODE = Path("/home/paperclip/.local/opt/node-v24.15.0-linux-x64/bin/node")
 KIMI_ENTRY = Path("/mnt/e/WSL/ZelyaKimiWindows/node_modules/@moonshot-ai/kimi-code/dist/main.mjs")
 KIMI_HOME = Path("/mnt/c/Users/Meku/.kimi-code")
+
+
+def signal_cli(process: asyncio.subprocess.Process, *, force: bool = False) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        if os.name == "posix":
+            # A CLI launcher may exit before its children close the output pipe.
+            os.killpg(process.pid, signal.SIGKILL if force else signal.SIGTERM)
+        elif force:
+            process.kill()
+        else:
+            process.terminate()
 
 
 @dataclass
@@ -56,6 +69,7 @@ class ProcessRunner:
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
+                start_new_session=os.name == "posix",
             )
         except FileNotFoundError:
             return RunResult(127, f"CLI не найден: {command[0]}\n")
@@ -77,7 +91,6 @@ class ProcessRunner:
                 limited = True
                 if self.rate_limit_callback:
                     await self.rate_limit_callback()
-                process.terminate()
                 return False
             return True
 
@@ -96,25 +109,25 @@ class ProcessRunner:
             if buffer:
                 await handle_line(buffer)
 
-        consumer = asyncio.create_task(consume())
+        async def stop_cli() -> None:
+            signal_cli(process, force=True)
+            with contextlib.suppress(TimeoutError):
+                # Drain buffered data so a paused pipe cannot block process cleanup.
+                await asyncio.wait_for(process.communicate(), timeout=5)
+
         try:
-            await asyncio.wait_for(process.wait(), timeout=timeout_minutes * 60)
+            async with asyncio.timeout(timeout_minutes * 60):
+                await consume()
+                if not limited:
+                    await process.wait()
         except TimeoutError:
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=10)
-            except TimeoutError:
-                process.kill()
-                await process.wait()
-            await consumer
-            return RunResult(-1, "".join(lines), timed_out=True)
-        try:
-            await consumer
-        except Exception:
-            if process.returncode is None:
-                process.kill()
-                await process.wait()
+            await stop_cli()
+            return RunResult(-1, "".join(lines), rate_limited=limited, timed_out=not limited)
+        except (asyncio.CancelledError, Exception):
+            await stop_cli()
             raise
+        if limited:
+            await stop_cli()
         output = "".join(lines)
         # A failed run is judged by the end of its output too: a text CLI may report the
         # limit on a line that does not look like an error report.

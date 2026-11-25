@@ -9,7 +9,7 @@ from .config import settings
 from .database import connect, decode_agent, decode_task, now, spent_tokens, transaction
 from .events import bus
 from .repo import RepoError, export_task_files, prepare_checkout, repository_url
-from .runner import ProcessRunner, RunResult
+from .runner import ProcessRunner, RunResult, signal_cli
 from .schemas import IntegrationSettings
 from .tracker import find_reply, integration_settings, publish_questions
 from .worker_hub import hub
@@ -705,13 +705,12 @@ class Dispatcher:
 
     async def _stop_run(self, task_id: int) -> None:
         process = self.processes.get(task_id)
-        if process and process.returncode is None:
-            process.terminate()
+        if process:
+            signal_cli(process)
             try:
                 await asyncio.wait_for(process.wait(), timeout=5)
             except TimeoutError:
-                process.kill()
-                await process.wait()
+                signal_cli(process, force=True)
         job = self.runs.get(task_id)
         if job and not job.done():
             try:
