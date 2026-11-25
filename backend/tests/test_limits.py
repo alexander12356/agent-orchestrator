@@ -107,6 +107,7 @@ def test_document_review_uses_current_scenario_format(client, agent, idle):
     assert "Для каждого обязательного сценария проследи путь" in prompt
     assert "Отсутствие имён методов, их сигнатур или служебных шагов не является блокером" in prompt
     assert "Выбор реализации оставь разработчику" in prompt
+    assert "Прочитай AGENTS.md в checkout задачи" not in prompt
 
 
 def test_code_review_prompt_uses_checkout_and_approved_document(client, agent, idle, tmp_path):
@@ -124,6 +125,9 @@ def test_code_review_prompt_uses_checkout_and_approved_document(client, agent, i
     assert f"Ветка task-1, коммит {commit}" in prompt
     assert "Сверь реализацию в checkout" in prompt
     assert "проверь достижимость действия через рабочий интерфейс" in prompt
+    assert "Прочитай AGENTS.md в checkout задачи" in prompt
+    assert "Для нарушения AGENTS.md назови файл и конкретное правило" in prompt
+    assert "Отсутствие записи о команде само по себе не доказывает нарушение" in prompt
     assert '"notes": string[]' in prompt
     assert "через доступные GitHub" not in prompt
 
