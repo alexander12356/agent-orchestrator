@@ -24,6 +24,68 @@ RATE_LIMIT_TAIL_LINES = 20
 KIMI_NODE = Path("/mnt/c/Program Files/nodejs/node.exe")
 KIMI_ENTRY = Path("/mnt/e/WSL/ZelyaKimiWindows/node_modules/@moonshot-ai/kimi-code/dist/main.mjs")
 ZCODE_NODE = Path("/mnt/c/Program Files/nodejs/node.exe")
+PR_DETAILS_FILE = "orchestrator-pr.json"
+PR_DETAILS_CONTRACT = (
+    '{"purpose": string, "changes": string[], "implementation": string[], '
+    '"before": string, "after": string, "validation": string[], "review_focus": string[]}'
+)
+
+
+def read_pr_details(path: Path) -> dict[str, Any]:
+    """Read the implementation summary that becomes the public pull request body."""
+    invalid = f"Файл {path.name} не соответствует контракту {PR_DETAILS_CONTRACT}: "
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError(f"Файл {path.name} не читается как JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(invalid + "нужен JSON-объект")
+    result: dict[str, Any] = {}
+    for key in ("purpose", "before", "after"):
+        value = data.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise RuntimeError(invalid + f"{key} должен быть непустой строкой")
+        result[key] = value.strip()
+    for key in ("changes", "implementation"):
+        items = data.get(key)
+        if not isinstance(items, list) or not items or not all(isinstance(item, str) and item.strip() for item in items):
+            raise RuntimeError(invalid + f"{key} должен быть непустым списком строк")
+        result[key] = [item.strip() for item in items]
+    for key in ("validation", "review_focus"):
+        items = data.get(key, [])
+        if not isinstance(items, list) or not all(isinstance(item, str) and item.strip() for item in items):
+            raise RuntimeError(invalid + f"{key} должен быть списком непустых строк")
+        result[key] = [item.strip() for item in items]
+    return result
+
+
+def markdown_list(items: list[str]) -> str:
+    return "\n".join(f"- {item}" for item in items)
+
+
+def format_pr_body(
+    details: dict[str, Any], task_id: int, unity_status: str, stat: str,
+    external_issue_key: str = "", external_issue_url: str = "",
+) -> str:
+    sections = [
+        f"## Цель\n\n{details['purpose']}",
+        f"## Что сделано\n\n{markdown_list(details['changes'])}",
+        f"## Как реализовано\n\n{markdown_list(details['implementation'])}",
+        f"## Было\n\n{details['before']}",
+        f"## Стало\n\n{details['after']}",
+        f"## Проверка\n\n{markdown_list([unity_status, *details['validation']])}",
+        f"## Область изменений\n\n```text\n{stat.strip() or 'Нет изменений относительно origin/main.'}\n```",
+    ]
+    if details["review_focus"]:
+        sections.append(f"## На что обратить внимание при ревью\n\n{markdown_list(details['review_focus'])}")
+    source = external_issue_key or "Исходная задача"
+    if external_issue_url:
+        source = f"[{source}]({external_issue_url})"
+    elif not external_issue_key:
+        source = ""
+    footer = " · ".join(filter(None, [source, f"Задача оркестратора №{task_id}"]))
+    sections.append(f"---\n\n{footer}")
+    return "\n\n".join(sections)
 
 
 def kimi_launcher() -> list[str]:
@@ -371,6 +433,13 @@ class UnityWorker:
             await self.log(task_id, f"{label}: {details}. Переключаюсь на fallback: {next_label}\n")
         raise RuntimeError("CLI завершился с ошибкой — " + "; ".join(failures))
 
+    async def upsert_pr(self, path: Path, branch: str, title: str, body: str) -> str:
+        pr_url = (await self.checked(["gh", "pr", "list", "--head", branch, "--json", "url", "--jq", ".[0].url"], path)).strip()
+        if pr_url:
+            await self.checked(["gh", "pr", "edit", pr_url, "--title", title, "--body", body], path)
+            return pr_url
+        return (await self.checked(["gh", "pr", "create", "--draft", "--title", title, "--body", body], path)).strip()
+
     async def assign(self, message: dict[str, Any]) -> None:
         task_id, run_id = int(message["task_id"]), int(message["run_id"])
         config = message["agent_config"]
@@ -379,26 +448,44 @@ class UnityWorker:
         try:
             path = await self.prepare_worktree(task_id, message["branch_name"])
             docs = path / "orchestrator-tech-doc.md"
+            details_path = path / PR_DETAILS_FILE
             docs.write_text(message.get("tech_doc_content", ""), encoding="utf-8")
+            details_path.unlink(missing_ok=True)
+            title = str(message.get("task_title") or "").strip() or f"Task {task_id}"
+            description = str(message.get("task_description") or "").strip()
             review = message.get("review_comments_content", "")
-            prompt = f"{config.get('role_prompt', '')}\nРеализуй задачу по {docs}.\n"
+            prompt = f"{config.get('role_prompt', '')}\nЗадача #{task_id}: {title}\n"
+            if description:
+                prompt += f"Исходное описание задачи:\n{description}\n"
+            prompt += f"Реализуй задачу по {docs}.\n"
             if review:
                 prompt += f"Замечания прошлого ревью (comments — блокеры, исправить обязательно; notes — учесть):\n{review}\n"
-            prompt += "Вноси только необходимые изменения. Не выполняй git commit/push: это сделает воркер."
+            prompt += (
+                "Вноси только необходимые изменения. Не выполняй git commit/push и не создавай PR: это сделает воркер.\n"
+                f"После реализации обязательно создай {details_path} по контракту {PR_DETAILS_CONTRACT}.\n"
+                "Заполни его по фактически внесённым изменениям конкретно и без общих фраз: purpose — зачем нужна задача, "
+                "changes — что сделано, implementation — какими способами и в каких местах это реализовано, "
+                "before и after — поведение до и после изменений. В validation перечисли только проверки, которые ты действительно "
+                "запустил, с командой и результатом; если таких нет, оставь список пустым. В review_focus укажи важные для ревью "
+                "решения, ограничения или риски либо оставь список пустым. Не включай в JSON незапущенные проверки и выдуманные результаты."
+            )
             selected, result = await self.run_with_fallback(task_id, path, prompt, config, triggers)
             unity_status = await self.run_unity(path, task_id)
+            details = read_pr_details(details_path)
             docs.unlink(missing_ok=True)
+            details_path.unlink(missing_ok=True)
             code, _ = await self.execute(["git", "diff", "--quiet"], path)
             if code:
                 await self.checked(["git", "add", "-A"], path)
                 await self.checked(["git", "commit", "-m", f"feat: implement task {task_id}"], path)
             await self.checked(["git", "push", "-u", "origin", message["branch_name"]], path)
-            code, pr_url = await self.execute(["gh", "pr", "list", "--head", message["branch_name"], "--json", "url", "--jq", ".[0].url"], path)
-            pr_url = pr_url.strip()
-            if not pr_url:
-                pr_url = (await self.checked(["gh", "pr", "create", "--draft", "--title", f"Task {task_id}", "--body", f"Автоматическая реализация задачи #{task_id}"], path)).strip()
             stat = await self.checked(["git", "diff", "--stat", "origin/main...HEAD"], path)
-            report = f"# Отчет реализации\n\n{unity_status}\n\n## Git diff --stat\n\n```text\n{stat}\n```\n\n## Вывод CLI\n\n```text\n{result['output'][-20000:]}\n```"
+            pr_body = format_pr_body(
+                details, task_id, unity_status, stat,
+                str(message.get("external_issue_key") or ""), str(message.get("external_issue_url") or ""),
+            )
+            pr_url = await self.upsert_pr(path, message["branch_name"], title, pr_body)
+            report = f"# Отчет реализации\n\n{pr_body}\n\n## Вывод CLI\n\n```text\n{result['output'][-20000:]}\n```"
             await self.send({"type": "TASK_COMPLETED", "task_id": task_id, "run_id": run_id, "report": report, "pr_url": pr_url, "worktree_path": str(path), "cli_used": selected.get("cli"), "model_used": selected.get("model", ""), "is_fallback": selected != config["primary"], **{k: v for k, v in result.items() if k in ("input_tokens", "output_tokens", "cache_tokens", "estimated")}})
             await self.send({"type": "TASK_META", "task_id": task_id, "tokens_estimated": result.get("estimated", False)})
         except asyncio.CancelledError:

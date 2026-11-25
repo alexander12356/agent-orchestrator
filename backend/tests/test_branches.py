@@ -1,6 +1,8 @@
+import asyncio
 from types import SimpleNamespace
 
 from app.database import connect, init_db, now
+from app.dispatcher import dispatcher
 from conftest import make_task
 
 
@@ -50,3 +52,23 @@ def test_merge_cleanup_uses_the_task_branch(client, agent, monkeypatch):
     response = client.post(f"/api/tasks/{task['id']}/merge", json={})
     assert response.status_code == 200
     assert [(message['type'], message['branch_name']) for message in sent] == [('CLEANUP_WORKTREE', 'Agent-Orchestrator/ZEL-23')]
+
+
+def test_worker_assignment_contains_task_context_for_the_pr(client, agent, monkeypatch):
+    task = make_task(client, agent, 'Сохранение прогресса')
+    task.update({
+        'external_issue_key': 'ZEL-42',
+        'external_issue_url': 'https://tracker.example/ZEL-42',
+    })
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+        return True
+
+    monkeypatch.setattr('app.dispatcher.hub', SimpleNamespace(send=send))
+    asyncio.run(dispatcher._run_worker(task, agent, 1, 1))
+    assert sent[0]['task_title'] == 'Сохранение прогресса'
+    assert sent[0]['task_description'] == 'Description'
+    assert sent[0]['external_issue_key'] == 'ZEL-42'
+    assert sent[0]['external_issue_url'] == 'https://tracker.example/ZEL-42'

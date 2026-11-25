@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -281,3 +282,141 @@ def test_run_agent_stops_a_cli_that_reports_a_limit(tmp_path):
     assert result['rate_limited'] is True
     assert result['timed_out'] is False
     assert result['exit_code'] != 0
+
+
+def implementation_details():
+    return {
+        'purpose': 'Сохранять прогресс после перезапуска игры.',
+        'changes': ['Добавлено сохранение прогресса в файл.'],
+        'implementation': ['SaveSystem сериализует состояние перед выходом.'],
+        'before': 'После перезапуска прогресс терялся.',
+        'after': 'Сохранённое состояние восстанавливается при запуске.',
+        'validation': ['pytest tests/test_save.py — успешно'],
+        'review_focus': ['Проверить обработку повреждённого файла.'],
+    }
+
+
+def test_pr_body_contains_implementation_and_verified_results(tmp_path):
+    path = tmp_path / module.PR_DETAILS_FILE
+    path.write_text(json.dumps(implementation_details()), encoding='utf-8')
+    details = module.read_pr_details(path)
+    body = module.format_pr_body(
+        details, 42, 'Unity batchmode завершился успешно.', 'SaveSystem.cs | 20 +++',
+        'ZEL-42', 'https://tracker.example/ZEL-42',
+    )
+    for heading in ('## Цель', '## Что сделано', '## Как реализовано', '## Было', '## Стало', '## Проверка', '## Область изменений', '## На что обратить внимание при ревью'):
+        assert heading in body
+    assert 'Добавлено сохранение прогресса в файл.' in body
+    assert 'Unity batchmode завершился успешно.' in body
+    assert 'pytest tests/test_save.py — успешно' in body
+    assert 'SaveSystem.cs | 20 ++' in body
+    assert '[ZEL-42](https://tracker.example/ZEL-42)' in body
+    assert 'Задача оркестратора №42' in body
+
+
+def test_pr_details_require_specific_content_and_omit_empty_review_focus(tmp_path):
+    path = tmp_path / module.PR_DETAILS_FILE
+    details = implementation_details()
+    details['changes'] = []
+    path.write_text(json.dumps(details), encoding='utf-8')
+    with pytest.raises(RuntimeError, match='changes'):
+        module.read_pr_details(path)
+
+    details = implementation_details()
+    details['review_focus'] = []
+    details['validation'] = []
+    body = module.format_pr_body(details, 1, 'Сборка не запускалась.', '')
+    assert '## На что обратить внимание при ревью' not in body
+    assert 'Нет изменений относительно origin/main.' in body
+
+
+def test_assign_creates_pr_from_summary_and_keeps_service_files_out_of_commit(tmp_path):
+    worker = make_worker(tmp_path)
+    path = tmp_path / 'task-worktree'
+    path.mkdir()
+    commands = []
+    prompts = []
+    sent = []
+
+    async def prepare_worktree(task_id, branch):
+        return path
+
+    async def run_with_fallback(task_id, worktree, prompt, config, triggers):
+        prompts.append(prompt)
+        (path / module.PR_DETAILS_FILE).write_text(json.dumps(implementation_details()), encoding='utf-8')
+        return KIMI, agent_result(output='raw CLI output')
+
+    async def run_unity(worktree, task_id):
+        return 'Unity batchmode завершился успешно.'
+
+    async def execute(command, cwd=None):
+        commands.append(command)
+        assert command == ['git', 'diff', '--quiet']
+        return 1, ''
+
+    async def checked(command, cwd=None):
+        commands.append(command)
+        if command == ['git', 'add', '-A']:
+            assert not (path / 'orchestrator-tech-doc.md').exists()
+            assert not (path / module.PR_DETAILS_FILE).exists()
+        if command[:3] == ['git', 'diff', '--stat']:
+            return 'SaveSystem.cs | 20 +++\n'
+        if command[:3] == ['gh', 'pr', 'list']:
+            return ''
+        if command[:3] == ['gh', 'pr', 'create']:
+            return 'https://github.example/pull/42\n'
+        return ''
+
+    async def send(message):
+        sent.append(message)
+
+    worker.prepare_worktree = prepare_worktree
+    worker.run_with_fallback = run_with_fallback
+    worker.run_unity = run_unity
+    worker.execute = execute
+    worker.checked = checked
+    worker.send = send
+    asyncio.run(worker.assign({
+        'task_id': 42,
+        'run_id': 7,
+        'branch_name': 'Agent-Orchestrator/ZEL-42',
+        'task_title': 'Сохранение прогресса',
+        'task_description': 'Прогресс должен переживать перезапуск.',
+        'external_issue_key': 'ZEL-42',
+        'external_issue_url': 'https://tracker.example/ZEL-42',
+        'tech_doc_content': '# Технический документ',
+        'review_comments_content': '',
+        'agent_config': {'primary': KIMI, 'fallback': [], 'triggers': {}, 'role_prompt': 'Unity developer'},
+    }))
+
+    create = next(command for command in commands if command[:3] == ['gh', 'pr', 'create'])
+    assert create[create.index('--title') + 1] == 'Сохранение прогресса'
+    body = create[create.index('--body') + 1]
+    assert '## Что сделано' in body
+    assert 'SaveSystem сериализует состояние перед выходом.' in body
+    assert 'raw CLI output' not in body
+    assert 'Прогресс должен переживать перезапуск.' in prompts[0]
+    assert module.PR_DETAILS_CONTRACT in prompts[0]
+    completed = next(message for message in sent if message['type'] == 'TASK_COMPLETED')
+    assert completed['pr_url'] == 'https://github.example/pull/42'
+    assert body in completed['report']
+    assert 'raw CLI output' in completed['report']
+
+
+def test_existing_pr_is_updated_instead_of_reused_unchanged(tmp_path):
+    worker = make_worker(tmp_path)
+    commands = []
+
+    async def checked(command, cwd=None):
+        commands.append(command)
+        if command[:3] == ['gh', 'pr', 'list']:
+            return 'https://github.example/pull/42\n'
+        return ''
+
+    worker.checked = checked
+    url = asyncio.run(worker.upsert_pr(tmp_path, 'Agent-Orchestrator/ZEL-42', 'Title', 'Updated body'))
+    assert url == 'https://github.example/pull/42'
+    assert [command[:3] for command in commands] == [['gh', 'pr', 'list'], ['gh', 'pr', 'edit']]
+    edit = commands[1]
+    assert edit[3] == url
+    assert edit[edit.index('--body') + 1] == 'Updated body'
