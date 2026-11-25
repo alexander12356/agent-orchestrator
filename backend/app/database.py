@@ -66,6 +66,7 @@ CREATE TABLE IF NOT EXISTS stage_runs (
     model_used TEXT,
     is_fallback INTEGER NOT NULL DEFAULT 0,
     artifact_path TEXT,
+    reviewed_document TEXT,
     yougile_question_message_id INTEGER,
     input_tokens INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0,
@@ -137,6 +138,8 @@ def init_db() -> None:
         run_columns = {row["name"] for row in conn.execute("PRAGMA table_info(stage_runs)")}
         if "yougile_question_message_id" not in run_columns:
             conn.execute("ALTER TABLE stage_runs ADD COLUMN yougile_question_message_id INTEGER")
+        if "reviewed_document" not in run_columns:
+            conn.execute("ALTER TABLE stage_runs ADD COLUMN reviewed_document TEXT")
         # A task that already reached the worker may have its old branch pushed to origin.
         legacy = conn.execute(
             "SELECT id, external_issue_key FROM tasks WHERE branch_name='feat/task-' || id AND NOT EXISTS (SELECT 1 FROM stage_runs WHERE task_id=tasks.id AND stage=3)"

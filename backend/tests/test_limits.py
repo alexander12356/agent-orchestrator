@@ -3,8 +3,8 @@ import json
 
 import pytest
 
-from app.database import connect
-from app.dispatcher import dispatcher, latest_version, limits, task_dir
+from app.database import connect, now, transaction
+from app.dispatcher import dispatcher, document_review, latest_version, limits, task_dir
 from app.runner import RunResult
 from conftest import make_task
 
@@ -76,7 +76,14 @@ def test_revision_prompt_names_previous_document_and_new_output(client, agent, i
     }))
 
     (directory / '02_doc_review_v2.json').write_text('{')  # Interrupted review
-    prompt = dispatcher._prompt(task, agent, 1, 2)
+    doc = directory / '01_tech_doc_v1.md'
+    with transaction() as conn:
+        conn.executemany(
+            "INSERT INTO stage_runs(task_id, stage, attempt, reviewed_document, status, started_at) "
+            "VALUES (?, 2, ?, ?, ?, ?)",
+            [(task['id'], attempt, doc.name, status, now()) for attempt, status in [(1, 'completed'), (2, 'error')]],
+        )
+    prompt = dispatcher._prompt(task, agent, 1, 2, doc=doc, review=document_review(task['id'], doc))
 
     assert f"Предыдущая версия: {directory / '01_tech_doc_v1.md'}" in prompt
     assert "Blocking issue" in prompt
@@ -91,6 +98,58 @@ def test_revision_prompt_names_previous_document_and_new_output(client, agent, i
     assert "Покажи в Mermaid" in prompt
     assert "Исключи списки публичных методов" in prompt
     assert "Mermaid block-beta" not in prompt
+
+
+def test_document_revision_after_answer_ignores_review_of_older_version(client, agent, idle, monkeypatch):
+    task = make_task(client, agent)
+    directory = task_dir(task['id'])
+    old_doc = directory / '01_tech_doc_v1.md'
+    old_doc.write_text('# Old', encoding='utf-8')
+    verdict = {'status': 'REJECTED', 'comments': ['Old blocker']}
+    fake_runner(monkeypatch, [writes('02_doc_review_v1.json', json.dumps(verdict))])
+    asyncio.run(dispatcher.run_stage(task['id'], 2))
+    with connect() as conn:
+        assert conn.execute("SELECT reviewed_document FROM stage_runs WHERE stage=2").fetchone()[0] == old_doc.name
+    assert document_review(task['id'], old_doc) == verdict
+
+    source = '## Сущности и связи\nТара\n## Алгоритм\nСмена тары\n## Сценарии\nОтвет ожидается.\n'
+    doc = directory / '01_tech_doc_v2.md'
+    doc.write_text(source, encoding='utf-8')
+    (directory / '01_questions_v2.json').write_text(
+        json.dumps({'has_questions': True, 'questions': ['Which container?']}), encoding='utf-8',
+    )
+    (directory / '01_answers_v2.md').write_text('Keep the new one.', encoding='utf-8')
+    with transaction() as conn:
+        conn.execute(
+            "INSERT INTO stage_runs(task_id, stage, attempt, status, started_at) VALUES (?, 1, 2, 'completed', ?)",
+            (task['id'], now()),
+        )
+
+    def revise(cwd):
+        draft, = (cwd / 'logs').glob('tech-doc-*/01_tech_doc_v4.md')
+        assert draft.read_text(encoding='utf-8') == source
+        draft.write_text(source.replace('Ответ ожидается.', 'Оставляем новую тару.'), encoding='utf-8')
+        draft.with_name('01_questions_v4.json').write_text(
+            json.dumps({'has_questions': False, 'questions': []}), encoding='utf-8',
+        )
+        return RunResult(0, 'ok')
+
+    prompts = fake_runner(monkeypatch, [RunResult(0, 'no output'), revise])
+    asyncio.run(dispatcher.run_stage(task['id'], 1))
+    assert not (directory / '01_tech_doc_v3.md').exists()
+    assert current(client, task['id'])['current_stage'] == 1
+
+    asyncio.run(dispatcher.run_stage(task['id'], 1))
+    assert current(client, task['id'])['current_stage'] == 2
+    assert doc.read_text(encoding='utf-8') == source
+    assert (directory / '01_tech_doc_v4.md').read_text(encoding='utf-8') == source.replace(
+        'Ответ ожидается.', 'Оставляем новую тару.',
+    )
+    assert not list((directory / 'logs').glob('tech-doc-*'))
+    assert all(
+        'Рабочая копия техдокумента' in prompt and 'Which container?' in prompt and 'Old blocker' not in prompt
+        for prompt in prompts
+    )
 
 
 def test_document_review_uses_current_scenario_format(client, agent, idle):

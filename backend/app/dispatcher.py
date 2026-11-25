@@ -2,7 +2,9 @@ import asyncio
 import contextlib
 import json
 import re
+import shutil
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from .config import settings
@@ -52,6 +54,46 @@ def numbered_versions(directory: Path, pattern: str) -> list[Path]:
 def latest_version(directory: Path, pattern: str) -> Path | None:
     revisions = numbered_versions(directory, pattern)
     return revisions[-1] if revisions else None
+
+
+def latest_document(task_id: int, directory: Path) -> Path | None:
+    with connect() as conn:
+        unfinished = {
+            STAGE_FILES[1].format(attempt=row["attempt"])
+            for row in conn.execute(
+                "SELECT attempt FROM stage_runs WHERE task_id=? AND stage=1 AND status <> 'completed'",
+                (task_id,),
+            )
+        }
+    return next(
+        (path for path in reversed(numbered_versions(directory, "01_tech_doc_v*.md")) if path.name not in unfinished),
+        None,
+    )
+
+
+def document_review(task_id: int, doc: Path) -> dict[str, Any] | None:
+    with connect() as conn:
+        reviews = conn.execute(
+            """SELECT review.attempt, review.reviewed_document, (
+                   SELECT doc.attempt FROM stage_runs doc
+                   WHERE doc.task_id=review.task_id AND doc.stage=1 AND doc.status='completed' AND doc.id < review.id
+                   ORDER BY doc.id DESC LIMIT 1
+               ) AS legacy_document
+               FROM stage_runs review
+               WHERE review.task_id=? AND review.stage=2 AND review.status='completed'
+               ORDER BY review.id DESC""",
+            (task_id,),
+        ).fetchall()
+    for review in reviews:
+        target = review["reviewed_document"]
+        if target is None and review["legacy_document"] is not None:
+            target = STAGE_FILES[1].format(attempt=review["legacy_document"])
+        if target == doc.name:
+            try:
+                return read_verdict(doc.parent / STAGE_FILES[2].format(attempt=review["attempt"]))
+            except StageFailure:
+                continue
+    return None
 
 
 def limits() -> dict[str, int]:
@@ -292,7 +334,8 @@ class Dispatcher:
             await bus.publish(task_id, stage, f"Ошибка: {message}\n")
 
     def _prompt(self, task: dict[str, Any], agent: dict[str, Any], stage: int, attempt: int, *,
-                checkout: tuple[Path, str, str] | None = None, previous_error: str = "") -> str:
+                checkout: tuple[Path, str, str] | None = None, previous_error: str = "",
+                doc: Path | None = None, review: dict[str, Any] | None = None, draft: Path | None = None) -> str:
         directory = task_dir(task["id"])
         artifact = directory / STAGE_FILES[stage].format(attempt=attempt)
         inputs = [f"ТЗ: {directory / '00_task.md'}"]
@@ -304,14 +347,19 @@ class Dispatcher:
             inputs.append(
                 f"Локальный checkout репозитория: {repository}\n"
                 f"Ветка {ref}, коммит {commit}. Используй этот каталог только для чтения. "
-                "Самостоятельно найди в нём исходники, тесты и данные для задачи. "
-                "Проверяй контракты по файлам выбранного коммита перед тем, как задавать вопросы о недостающих сведениях."
+                + (
+                    "Открывай исходники для проверки контракта, затронутого правкой."
+                    if draft else
+                    "Самостоятельно найди в нём исходники, тесты и данные для задачи. "
+                    "Проверяй контракты по файлам выбранного коммита перед тем, как задавать вопросы о недостающих сведениях."
+                )
             )
         inputs.append(
             "Используй указанные артефакты. Отметь недостающие сведения. "
             "Не открывай GitHub, другие каталоги сервера, чужие задачи и базу."
         )
-        doc = latest_version(directory, "01_tech_doc_v*.md")
+        doc = doc or latest_document(task["id"], directory)
+        questions_file = (draft.parent if draft else directory) / f"01_questions_v{attempt}.json"
         answers = numbered_versions(directory, "01_answers_v*.md")
         if answers:
             inputs.append("Согласованные ответы в порядке версий. Если поздний ответ уточняет тот же вопрос, используй уточнение.")
@@ -324,27 +372,29 @@ class Dispatcher:
                 f"Ответ v{version}:\n{answer.read_text(encoding='utf-8').strip()}"
             )
         if stage == 1:
-            reviews = numbered_versions(directory, "02_doc_review_v*.json")
-            for review in reversed(reviews):
-                try:
-                    verdict = read_verdict(review)
-                except StageFailure:
-                    # An incomplete review can be left on disk after a failed run.
-                    continue
-                if verdict.get("status") == "REJECTED":
-                    inputs.append(
-                        "Исправь только актуальные блокеры прошлого ревью. Замечания о деталях прежнего "
-                        "формата оцени по структуре ниже. Сохрани согласованное поведение.\n"
-                        + "\n".join(f"- {comment}" for comment in verdict["comments"])
-                    )
-                break
-            if doc and (reviews or answers):
+            if review and review["status"] == "REJECTED":
+                inputs.append(
+                    "Исправь блокеры ревью этой версии. Сохрани согласованное поведение.\n"
+                    + "\n".join(f"- {comment}" for comment in review["comments"])
+                )
+            if doc and not draft and (review or answers):
                 inputs.append(
                     f"Предыдущая версия: {doc}. Сохрани согласованное поведение. "
                     "Исправь затронутые места и приведи документ к актуальному формату."
                 )
+            if draft:
+                inputs.append(
+                    f"Рабочая копия техдокумента: {draft}. Внеси точечные правки по новому ответу "
+                    "или указанным блокерам. Сохрани согласованное поведение и текст остальных разделов. "
+                    "Если изменилась связь или развилка, сверяй её по исходникам и обнови связанные места "
+                    "в схеме и сценариях. Для правки используй редактирование отдельных фрагментов рабочей копии. "
+                    "Запиши JSON с вопросами после завершения правок, даже если документ уже учитывает ответ."
+                )
+                output = "Сохрани три раздела в этом порядке:"
+            else:
+                output = f"Запиши полный техдокумент в {artifact}. Используй три раздела в таком порядке:"
             result = (
-                f"Запиши полный техдокумент в {artifact}. Используй три раздела в таком порядке:\n"
+                f"{output}\n"
                 "1. «Сущности и связи». Перечисли новые и изменяемые сущности: компоненты, презентеры, "
                 "сервисы, узлы и подграфы NodeCanvas и другие части проекта. Для каждой новой сущности "
                 "укажи ответственность, для изменяемой — что меняется. Связанные узлы можешь описать "
@@ -363,7 +413,7 @@ class Dispatcher:
                 "Опирайся на исходники для существующих сущностей и связей. "
                 "Открытое продуктовое решение отметь у затронутого сценария и запиши вопрос отдельно. "
                 "Сохрани документ даже при открытых вопросах.\n"
-                f"Запиши вопросы в {directory / f'01_questions_v{attempt}.json'} как "
+                f"Запиши вопросы в {questions_file} как "
                 '{"has_questions": boolean, "questions": string[]}. Без вопросов укажи false и [].'
             )
         else:
@@ -472,51 +522,84 @@ class Dispatcher:
         if url:
             await log("Агент запущен\n")
         previous_error = self._previous_error(task["id"], stage, attempt) if task["auto_retries"] else ""
-        prompt = self._prompt(task, agent, stage, attempt, checkout=checkout, previous_error=previous_error)
         artifact_name = STAGE_FILES[stage].format(attempt=attempt)
         artifact = directory / artifact_name
+        doc = latest_document(task["id"], directory) if stage in (1, 2) else None
+        review = document_review(task["id"], doc) if stage == 1 and doc else None
+        if stage == 2 and doc:
+            with transaction() as conn:
+                conn.execute("UPDATE stage_runs SET reviewed_document=? WHERE id=?", (doc.name, run_id))
+        revise = False
+        if stage == 1 and doc:
+            version = VERSION_RE.search(doc.name)[1]
+            has_feedback = (directory / f"01_answers_v{version}.md").is_file() or (
+                review is not None and review["status"] == "REJECTED"
+            )
+            if has_feedback:
+                headings = re.findall(r"^#{1,6} +(.+)$", doc.read_text(encoding="utf-8"), re.MULTILINE)
+                sections = ("Сущности и связи", "Алгоритм", "Сценарии")
+                revise = all(any(section in heading for heading in headings) for section in sections)
 
         result: RunResult | None = None
         success = False
+        validation_error = None
         configs = [agent["primary_config"], *agent["fallback_configs"]]
-        for index, config in enumerate(configs):
-            if task["id"] in self.stop_requested:
-                return
-            if config.get("environment") == "worker":
-                raise RuntimeError("Серверный этап не может выполняться на Local Worker")
-            if index:
-                await log(f"Fallback: {config['cli']} {config.get('model', '')}\n")
-            runner = ProcessRunner(log_callback=log, on_process=lambda process, task_id=task["id"]: self.processes.__setitem__(task_id, process))
-            result = await runner.run(
-                config,
-                prompt,
-                directory,
-                env,
-                agent["fallback_triggers"].get("timeout_minutes", 20),
+        with contextlib.ExitStack() as stack:
+            draft = None
+            if revise:
+                scratch = Path(stack.enter_context(TemporaryDirectory(prefix="tech-doc-", dir=directory / "logs")))
+                draft = scratch / artifact_name
+                draft_questions = scratch / f"01_questions_v{attempt}.json"
+            prompt = self._prompt(
+                task, agent, stage, attempt, checkout=checkout, previous_error=previous_error,
+                doc=doc, review=review, draft=draft,
             )
-            if task["id"] in self.stop_requested:
-                self._mark_stopped(run_id)
-                return
-            # A usable result ends the chain whatever the output says about limits.
-            success = result.exit_code == 0 and artifact.exists()
-            if success:
-                break
-            triggers = agent["fallback_triggers"]
-            # A missing artifact is a failed run even if the CLI returned zero.
-            retry = (
-                (result.rate_limited and triggers.get("rate_limit", True))
-                or (result.timed_out and triggers.get("timeout", True))
-                or triggers.get("exit_code", True)
-            )
-            if not retry or index == len(configs) - 1:
-                break
-            if result.exit_code == 127:
-                await log(result.output)
-            elif result.exit_code == 0 and not artifact.exists():
-                await log(f"CLI завершился без артефакта {artifact_name}.\n")
+            for index, config in enumerate(configs):
+                if task["id"] in self.stop_requested:
+                    return
+                if config.get("environment") == "worker":
+                    raise RuntimeError("Серверный этап не может выполняться на Local Worker")
+                if draft:
+                    shutil.copyfile(doc, draft)
+                    draft_questions.unlink(missing_ok=True)
+                if index:
+                    await log(f"Fallback: {config['cli']} {config.get('model', '')}\n")
+                runner = ProcessRunner(log_callback=log, on_process=lambda process, task_id=task["id"]: self.processes.__setitem__(task_id, process))
+                result = await runner.run(
+                    config, prompt, directory, env, agent["fallback_triggers"].get("timeout_minutes", 20),
+                )
+                if task["id"] in self.stop_requested:
+                    self._mark_stopped(run_id)
+                    return
+                validation_error = None
+                if draft and result.exit_code == 0:
+                    try:
+                        if not draft.is_file() or not draft.read_text(encoding="utf-8").strip() or not draft_questions.is_file():
+                            raise StageFailure("Уточнение техдокумента не завершено: нужны рабочая копия и JSON с вопросами.")
+                        read_questions(draft_questions)
+                    except (StageFailure, OSError, UnicodeError) as exc:
+                        validation_error = str(exc)
+                    else:
+                        draft_questions.replace(directory / draft_questions.name)
+                        draft.replace(artifact)
+                success = result.exit_code == 0 and not validation_error and artifact.exists()
+                if success:
+                    break
+                triggers = agent["fallback_triggers"]
+                retry = (
+                    (result.rate_limited and triggers.get("rate_limit", True))
+                    or (result.timed_out and triggers.get("timeout", True))
+                    or triggers.get("exit_code", True)
+                )
+                if not retry or index == len(configs) - 1:
+                    break
+                if result.exit_code == 127:
+                    await log(result.output)
+                elif result.exit_code == 0:
+                    await log((validation_error or f"CLI завершился без артефакта {artifact_name}.") + "\n")
         assert result is not None
         status = "completed" if success else "error"
-        error = None if success else describe_failure(result, artifact_name)
+        error = None if success else validation_error or describe_failure(result, artifact_name)
         with transaction() as conn:
             conn.execute(
                 "UPDATE stage_runs SET cli_used=?, model_used=?, is_fallback=?, artifact_path=?, input_tokens=?, output_tokens=?, cache_tokens=?, tokens_estimated=?, status=?, finished_at=?, error=? WHERE id=?",
@@ -528,7 +611,7 @@ class Dispatcher:
 
     async def _run_worker(self, task: dict[str, Any], agent: dict[str, Any], attempt: int, run_id: int) -> None:
         directory = task_dir(task["id"])
-        docs = latest_version(directory, "01_tech_doc_v*.md")
+        docs = latest_document(task["id"], directory)
         reviews = latest_version(directory, "04_code_review_v*.json")
         sent = await hub.send({
             "type": "ASSIGN_TASK",
