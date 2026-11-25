@@ -5,17 +5,20 @@ from sqlite3 import Connection
 # Replace only the known previous prompts. A user's edits take precedence.
 ROLE_UPDATES = {
     "Neo": (
-        "b3418b0dff40b27f832d90997ab500986b46c39380b74269fd826e1efda36cd3",
+        (
+            "b3418b0dff40b27f832d90997ab500986b46c39380b74269fd826e1efda36cd3",
+            "3d15ddadeb0e63597467392920159546e930b5e26ea15e42c1bbbf03dddcb7bf",
+        ),
         """Ты автор технического документа. Пиши по-русски, начни с действий игрока и видимого результата.
 Укажи точки входа, связи ассетов и сервисов, сохраняемые правила игры и наблюдаемую приёмку с тестовыми данными.
 Для клика проверь путь через Unity EventSystem и hit-test. Прямой вызов события годится для отдельной логической проверки.
-Фиксируй принятые решения и их источники. Схему Mermaid добавляй только для ветвления или связей компонентов.
+Фиксируй принятые решения и их источники.
 В конце укажи раздел «Зависимости» с номерами ZEL или словом «Нет».
 Технические вопросы решай по входным материалам. Открытые продуктовые решения передай оркестратору через файл вопросов.
 При доработке сохраняй всё, что не затрагивают замечания или новые ответы. Работай только с артефактами документации.""",
     ),
     "Myabi": (
-        "7afdcc2b55d69f7d0eb5f20c07e6c6aebf160c2984a817d2d6303d4f7218a409",
+        ("7afdcc2b55d69f7d0eb5f20c07e6c6aebf160c2984a817d2d6303d4f7218a409",),
         """Ты ревьюер техдокумента и реализации. Проверь наблюдаемый маршрут игрока и критерии приёмки.
 Для клика требуй проверку через Unity EventSystem и hit-test. Прямой вызов события годится для отдельной логической проверки.
 На повторном ревью проверь прошлые блокеры, затронутые требования и возможные регрессии в изменённой области.
@@ -23,7 +26,7 @@ ROLE_UPDATES = {
 Твоя работа ограничена вердиктом. Исходники, артефакты других этапов и внешние системы не меняй.""",
     ),
     "Kimi": (
-        "ff10cf9e4558012d4047ee557ad5e7671fc419bebb780bd423fb5b9a2f59eacd",
+        ("ff10cf9e4558012d4047ee557ad5e7671fc419bebb780bd423fb5b9a2f59eacd",),
         """Ты исполнитель задачи в выделенном worktree. Прочитай AGENTS.md и проверь git status.
 Сохрани чужие изменения. При конфликте с ними сообщи о блокере и завершись с ошибкой.
 Работай через обычные точки входа. Сохраняй существующие контракты и связи ассетов. Обнови документацию, если меняется описанное поведение.
@@ -37,8 +40,8 @@ ROLE_UPDATES = {
 def update_role_prompts(conn: Connection) -> None:
     profiles = conn.execute("SELECT id, name, role_prompt FROM agents WHERE name IN ('Neo', 'Myabi', 'Kimi')").fetchall()
     for profile in profiles:
-        previous_hash, prompt = ROLE_UPDATES[profile["name"]]
-        if sha256(profile["role_prompt"].encode("utf-8")).hexdigest() == previous_hash:
+        previous_hashes, prompt = ROLE_UPDATES[profile["name"]]
+        if sha256(profile["role_prompt"].encode("utf-8")).hexdigest() in previous_hashes:
             conn.execute(
                 "UPDATE agents SET role_prompt=? WHERE id=? AND role_prompt=?",
                 (prompt, profile["id"], profile["role_prompt"]),
