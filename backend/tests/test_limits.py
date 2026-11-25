@@ -97,6 +97,8 @@ def test_revision_prompt_names_previous_document_and_new_output(client, agent, i
     assert "Сохрани согласованное поведение" in prompt
     assert "Покажи в Mermaid" in prompt
     assert "Исключи списки публичных методов" in prompt
+    assert "удали их из всего документа, включая разделы вне текущей правки" in prompt
+    assert "ответственность сущности, связь или ожидаемый результат сценария" in prompt
     assert "Mermaid block-beta" not in prompt
 
 
@@ -148,6 +150,7 @@ def test_document_revision_after_answer_ignores_review_of_older_version(client, 
     assert not list((directory / 'logs').glob('tech-doc-*'))
     assert all(
         'Рабочая копия техдокумента' in prompt and 'Which container?' in prompt and 'Old blocker' not in prompt
+        and 'удали их из всего документа, включая разделы вне текущей правки' in prompt
         for prompt in prompts
     )
 
@@ -165,6 +168,8 @@ def test_document_review_uses_current_scenario_format(client, agent, idle):
     assert "Для каждого обязательного сценария проследи путь" in prompt
     assert "Отсутствие имён методов, их сигнатур или служебных шагов не является блокером" in prompt
     assert "Выбор реализации оставь разработчику" in prompt
+    assert "покадровые переходы или устройство тестов, верни техдок на доработку" in prompt
+    assert "укажи фрагмент и что сохранить при сокращении" in prompt
     assert "Прочитай AGENTS.md в checkout задачи" not in prompt
 
 
