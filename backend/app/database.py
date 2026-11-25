@@ -1,4 +1,5 @@
 import json
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import UTC, datetime
@@ -96,6 +97,17 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     return conn
 
 
+BRANCH_PREFIX = "Agent-Orchestrator"
+ISSUE_KEY_RE = re.compile(r"[A-Za-z0-9]+-[0-9]+")
+
+
+def branch_name(task_id: int, issue_key: str | None = None) -> str:
+    key = (issue_key or "").strip()
+    if not ISSUE_KEY_RE.fullmatch(key):
+        key = f"task-{task_id}"
+    return f"{BRANCH_PREFIX}/{key}"
+
+
 def init_db() -> None:
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
     with connect() as conn:
@@ -104,6 +116,11 @@ def init_db() -> None:
         for column in ("external_issue_key", "external_issue_url", "milestone", "sprint", "repository_url"):
             if column not in columns:
                 conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} TEXT")
+        # A task that already reached the worker may have its old branch pushed to origin.
+        legacy = conn.execute(
+            "SELECT id, external_issue_key FROM tasks WHERE branch_name='feat/task-' || id AND NOT EXISTS (SELECT 1 FROM stage_runs WHERE task_id=tasks.id AND stage=3)"
+        ).fetchall()
+        conn.executemany("UPDATE tasks SET branch_name=? WHERE id=?", [(branch_name(row["id"], row["external_issue_key"]), row["id"]) for row in legacy])
 
 
 @contextmanager

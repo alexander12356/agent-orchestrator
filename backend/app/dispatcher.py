@@ -407,7 +407,7 @@ class Dispatcher:
 
     async def merged(self, task_id: int, pr_url: str | None = None) -> None:
         with transaction() as conn:
-            task = conn.execute("SELECT worktree_path FROM tasks WHERE id=?", (task_id,)).fetchone()
+            task = conn.execute("SELECT worktree_path, branch_name FROM tasks WHERE id=?", (task_id,)).fetchone()
             if not task:
                 raise ValueError("Задача не найдена")
             conn.execute("UPDATE tasks SET current_stage=6, status='done', merged_to_main=1, pr_url=COALESCE(?, pr_url), updated_at=? WHERE id=?", (pr_url, now(), task_id))
@@ -419,7 +419,7 @@ class Dispatcher:
                 ).fetchone()["n"]
                 if not blocked:
                     conn.execute("UPDATE tasks SET current_stage=1, status='queued', updated_at=? WHERE id=? AND current_stage=0", (now(), child["task_id"]))
-        await hub.send({"type": "CLEANUP_WORKTREE", "task_id": task_id, "branch_name": f"feat/task-{task_id}", "worktree_path": task["worktree_path"]})
+        await hub.send({"type": "CLEANUP_WORKTREE", "task_id": task_id, "branch_name": task["branch_name"], "worktree_path": task["worktree_path"]})
         await self.schedule()
 
 

@@ -78,7 +78,7 @@
 - 2 → 3 (при `APPROVED`): ✅ Дока утверждена (v{N})
 - 3 → 4: 💻 Git Diff (+{files}) + Отчёт • 45.0k tok
 - 4 ↩ 3 (возврат при `REJECTED`): 🐞 Правки по коду (×{N}) • 6.8k tok
-- 4 → 5 (при `APPROVED`): 🚀 Ветка `feat/task-{id}` • Сборка OK
+- 4 → 5 (при `APPROVED`): 🚀 Ветка `Agent-Orchestrator/ZEL-{N}` • Сборка OK
 
 **Окно ревизии:** клик по стрелке перехода (по линии или плашке) открывает модальное окно с результатом исходного этапа — последней ревизией его артефакта (для стрелки 1 → 2 это `01_tech_doc_v{N}.md`). В окне доступны переключатель ревизий v1, v2…, просмотр Markdown/JSON и ссылка на артефакт в новой вкладке.
 
@@ -187,12 +187,12 @@ orchestrator/
 
 1. **Подключение:** `unity_worker.py` устанавливает постоянное WebSocket-соединение `ws://{VDS_HOST}/ws/worker` с заголовком `Authorization: Bearer {WORKER_TOKEN}` и шлёт heartbeat каждые 10 секунд.
 2. **Выдача задания (`ASSIGN_TASK`):**
-   - VDS отправляет JSON: `task_id`, `branch_name` (`feat/task-{id}`), `tech_doc_content`, `review_comments_content` (если был возврат), `agent_config` (primary + fallback цепочка).
+   - VDS отправляет JSON: `task_id`, `branch_name` (`Agent-Orchestrator/{ключ задачи Yougile}`, например `Agent-Orchestrator/ZEL-17`; без ключа — `Agent-Orchestrator/task-{id}`), `tech_doc_content`, `review_comments_content` (если был возврат), `agent_config` (primary + fallback цепочка).
 3. **Исполнение на ПК с Unity:**
    - Воркер проверяет/создаёт изолированный git worktree от свежего `origin/main` с отдельной локальной `Library` и мьютексом на запуск `Unity.exe -batchmode`; повторный запуск сохраняет существующий worktree и его `Library`.
    - Запускает локальный CLI-агент, транслирует строки stdout/stderr на VDS в реальном времени (`LOG_CHUNK`).
    - При срабатывании триггера ошибки/лимита переключается на следующую модель из `fallback_configs`.
-   - После успешного завершения делает `git add`, `git commit`, `git push origin feat/task-{id}` (и создаёт Draft PR через `gh pr create --draft`, если ещё не создан).
+   - После успешного завершения делает `git add`, `git commit`, `git push origin <branch_name>` (и создаёт Draft PR через `gh pr create --draft`, если ещё не создан).
    - Отправляет на VDS сообщение `TASK_COMPLETED` с отчётом, статистикой токенов и ссылкой на PR.
 4. **Очистка (`CLEANUP_WORKTREE`):** После получения VDS вебхука о мерже PR в main, сервер отправляет воркеру команду удалить локальный worktree и ветку.
 

@@ -101,6 +101,41 @@ def test_existing_worktree_is_not_reset(tmp_path):
     assert marker.read_text(encoding='utf-8') == 'keep'
 
 
+def test_worktree_is_created_on_issue_key_branch(tmp_path):
+    worker = make_worker(tmp_path)
+    commands = []
+
+    async def checked(command, cwd=None):
+        commands.append(command)
+        return ''
+
+    async def execute(command, cwd=None):
+        commands.append(command)
+        return 1, ''
+
+    worker.checked = checked
+    worker.execute = execute
+    result = asyncio.run(worker.prepare_worktree(23, 'Agent-Orchestrator/ZEL-23'))
+    assert result == worker.worktrees / 'task-23'
+    assert commands == [
+        ['git', 'fetch', 'origin', 'main'],
+        ['git', 'show-ref', '--verify', 'refs/heads/Agent-Orchestrator/ZEL-23'],
+        ['git', 'worktree', 'add', '-b', 'Agent-Orchestrator/ZEL-23', str(result), 'origin/main'],
+    ]
+
+
+def test_worktree_rejects_branch_names_outside_the_naming(tmp_path):
+    worker = make_worker(tmp_path)
+
+    async def unexpected(command, cwd=None):
+        raise AssertionError(f'Неожиданная команда: {command}')
+
+    worker.checked = worker.execute = unexpected
+    for branch in ('main', 'codex/zelya-1', 'Agent-Orchestrator/-main', 'Agent-Orchestrator/ZEL-23/extra'):
+        with pytest.raises(ValueError):
+            asyncio.run(worker.prepare_worktree(23, branch))
+
+
 def test_terminate_process_escalates_to_kill(tmp_path):
     worker = make_worker(tmp_path)
 

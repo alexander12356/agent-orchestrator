@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import ROOT, settings
-from .database import connect, decode_agent, decode_task, dumps, init_db, now, transaction
+from .database import branch_name, connect, decode_agent, decode_task, dumps, init_db, now, transaction
 from .dispatcher import dispatcher, task_dir
 from .events import bus
 from .runner import present_log_line
@@ -177,7 +177,7 @@ async def create_task(data: TaskCreate) -> dict[str, Any]:
             (data.title, data.description, data.external_issue_id, data.milestone, data.sprint, data.repository_url.strip(), 0 if blocked else 1, "blocked_main" if blocked else "queued", "pending", dumps(assignments), timestamp, timestamp),
         )
         task_id = cursor.lastrowid
-        conn.execute("UPDATE tasks SET branch_name=? WHERE id=?", (f"feat/task-{task_id}", task_id))
+        conn.execute("UPDATE tasks SET branch_name=? WHERE id=?", (branch_name(task_id), task_id))
         for dependency in data.dependencies:
             conn.execute("INSERT INTO task_dependencies VALUES (?, ?)", (task_id, dependency))
         row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
@@ -379,7 +379,7 @@ async def import_yougile_tasks() -> dict[str, int]:
                     (item["title"], item["description"], item["id"], item.get("key", ""), issue_url, repository, dumps({}), timestamp, timestamp),
                 )
                 task_id = cursor.lastrowid
-                conn.execute("UPDATE tasks SET branch_name=? WHERE id=?", (f"feat/task-{task_id}", task_id))
+                conn.execute("UPDATE tasks SET branch_name=? WHERE id=?", (branch_name(task_id, item.get("key")), task_id))
                 imported += 1
         directory = task_dir(task_id)
         (directory / "00_task.md").write_text(f"# {item['title']}\n\n{item['description']}", encoding="utf-8")

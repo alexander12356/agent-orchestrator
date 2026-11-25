@@ -9,7 +9,7 @@ from conftest import make_task
 def test_agent_and_task_crud(client, agent):
     task = make_task(client, agent, title='Player controller')
     assert task['current_stage'] == 1
-    assert task['branch_name'] == f"feat/task-{task['id']}"
+    assert task['branch_name'] == f"Agent-Orchestrator/task-{task['id']}"
     assert task['repository_url'] == ''
     response = client.put(f"/api/tasks/{task['id']}", json={'title': 'Player controller', 'description': 'Description', 'repository_url': 'https://github.com/T1mposter/zelya.git', 'stage_agents': {'1': agent['id']}})
     assert response.status_code == 200

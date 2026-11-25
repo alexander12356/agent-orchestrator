@@ -112,7 +112,8 @@ class UnityWorker:
         return output
 
     async def prepare_worktree(self, task_id: int, branch: str) -> Path:
-        if not re.fullmatch(r"feat/task-\d+", branch):
+        # feat/task-N is kept for tasks whose branch was created under the old naming.
+        if not re.fullmatch(r"(?:Agent-Orchestrator/(?:[A-Za-z0-9]+-\d+|task-\d+)|feat/task-\d+)", branch):
             raise ValueError("Некорректное имя ветки")
         path = self.worktrees / f"task-{task_id}"
         await self.checked(["git", "fetch", "origin", "main"], self.repo)
