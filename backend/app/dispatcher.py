@@ -312,23 +312,33 @@ class Dispatcher:
             "Не открывай GitHub, другие каталоги сервера, чужие задачи и базу."
         )
         doc = latest_version(directory, "01_tech_doc_v*.md")
-        if stage in (1, 2):
-            answers = numbered_versions(directory, "01_answers_v*.md")
-            if answers:
-                inputs.append(
-                    "Согласованные ответы в порядке версий: " + ", ".join(map(str, answers))
-                    + ". Если поздний ответ уточняет тот же вопрос, используй уточнение."
-                )
+        answers = numbered_versions(directory, "01_answers_v*.md")
+        if answers:
+            inputs.append("Согласованные ответы в порядке версий. Если поздний ответ уточняет тот же вопрос, используй уточнение.")
+        for answer in answers:
+            version = VERSION_RE.search(answer.name)[1]
+            questions = read_questions(directory / f"01_questions_v{version}.json")["questions"]
+            numbered = "\n".join(f"{i}. {question}" for i, question in enumerate(questions, start=1))
+            inputs.append(
+                f"Вопросы v{version}:\n{numbered or 'Исходные вопросы отсутствуют.'}\n"
+                f"Ответ v{version}:\n{answer.read_text(encoding='utf-8').strip()}"
+            )
         if stage == 1:
-            review = latest_version(directory, "02_doc_review_v*.json")
-            if review:
-                inputs.append(
-                    f"Замечания ревью: {review}. Исправь только актуальные блокеры из comments. "
-                    "Замечания о деталях прежнего формата оцени по структуре ниже. "
-                    "Если замечание указывает на нарушение согласованного поведения, сохрани это требование. "
-                    "Оставь notes в отчёте ревью."
-                )
-            if doc and (review or answers):
+            reviews = numbered_versions(directory, "02_doc_review_v*.json")
+            for review in reversed(reviews):
+                try:
+                    verdict = read_verdict(review)
+                except StageFailure:
+                    # An incomplete review can be left on disk after a failed run.
+                    continue
+                if verdict.get("status") == "REJECTED":
+                    inputs.append(
+                        "Исправь только актуальные блокеры прошлого ревью. Замечания о деталях прежнего "
+                        "формата оцени по структуре ниже. Сохрани согласованное поведение.\n"
+                        + "\n".join(f"- {comment}" for comment in verdict["comments"])
+                    )
+                break
+            if doc and (reviews or answers):
                 inputs.append(
                     f"Предыдущая версия: {doc}. Сохрани согласованное поведение. "
                     "Исправь затронутые места и приведи документ к актуальному формату."
@@ -370,7 +380,7 @@ class Dispatcher:
                     "назови сценарий, проблемное место, источник требования и ожидаемый результат. "
                     "Считай связь достаточной, если понятны участники, направление и смысл. "
                     "Отсутствие имён методов, их сигнатур или служебных шагов не является блокером. "
-                    "При проверке существующей связи укажи, какой сценарий она делает невозможным. "
+                    "Если утверждаешь, что связь мешает выполнить требование, назови конкретный сценарий и покажи, где обрывается его путь. "
                     "На повторном ревью проверь актуальные прошлые блокеры и затронутые сценарии. "
                     "Если для вердикта не хватает обязательного входного материала, назови его и заверши этап с ошибкой."
                 )

@@ -70,13 +70,19 @@ def test_revision_prompt_names_previous_document_and_new_output(client, agent, i
     task = make_task(client, agent)
     directory = task_dir(task['id'])
     (directory / '01_tech_doc_v1.md').touch()
-    (directory / '02_doc_review_v1.json').touch()
+    (directory / '02_doc_review_v1.json').write_text(json.dumps({
+        'status': 'REJECTED', 'comments': ['Blocking issue'], 'notes': ['Style suggestion'],
+        'summary': 'Review summary',
+    }))
 
+    (directory / '02_doc_review_v2.json').write_text('{')  # Interrupted review
     prompt = dispatcher._prompt(task, agent, 1, 2)
 
     assert f"Предыдущая версия: {directory / '01_tech_doc_v1.md'}" in prompt
-    assert f"Замечания ревью: {directory / '02_doc_review_v1.json'}" in prompt
-    assert "Исправь только актуальные блокеры из comments" in prompt
+    assert "Blocking issue" in prompt
+    assert "Style suggestion" not in prompt
+    assert "Review summary" not in prompt
+    assert "02_doc_review_v1.json" not in prompt
     assert f"Запиши полный техдокумент в {directory / '01_tech_doc_v2.md'}" in prompt
     sections = ['Сущности и связи', 'Алгоритм', 'Сценарии']
     positions = [prompt.index(f'«{section}»') for section in sections]
@@ -93,21 +99,31 @@ def test_document_review_uses_current_scenario_format(client, agent, idle):
     (directory / '01_tech_doc_v2.md').touch()
     (directory / '02_doc_review_v1.json').touch()
 
-    first_answer = directory / '01_answers_v9.md'
-    later_answer = directory / '01_answers_v10.md'
-    first_answer.touch()
-    later_answer.touch()
-
-    for stage in (1, 2):
-        prompt = dispatcher._prompt(task, agent, stage, 2)
-        assert f"Согласованные ответы в порядке версий: {first_answer}, {later_answer}" in prompt
-
+    prompt = dispatcher._prompt(task, agent, 2, 2)
+    assert "Если утверждаешь, что связь мешает выполнить требование" in prompt
     assert f"Документ: {directory / '01_tech_doc_v2.md'}" in prompt
     assert f"Предыдущий вердикт: {directory / '02_doc_review_v1.json'}" in prompt
     assert "Для каждого обязательного сценария проследи путь" in prompt
     assert "Отсутствие имён методов, их сигнатур или служебных шагов не является блокером" in prompt
     assert "Выбор реализации оставь разработчику" in prompt
     assert "Прочитай AGENTS.md в checkout задачи" not in prompt
+
+
+@pytest.mark.parametrize('stage', [1, 2, 4])
+def test_prompts_include_questions_alongside_the_original_reply(client, agent, idle, stage):
+    task = make_task(client, agent)
+    directory = task_dir(task['id'])
+    (directory / '01_tech_doc_v1.md').touch()
+    (directory / '03_impl_report_v1.md').touch()
+    (directory / '01_answers_v9.md').write_text('Earlier clarification')
+    (directory / '01_questions_v10.json').write_text(json.dumps({
+        'has_questions': True, 'questions': ['Which size?', 'Which colour?'],
+    }))
+    (directory / '01_answers_v10.md').write_text('Small.\n2 - second option.')
+
+    prompt = dispatcher._prompt(task, agent, stage, 11)
+    assert 'Вопросы v10:\n1. Which size?\n2. Which colour?\nОтвет v10:\nSmall.\n2 - second option.' in prompt
+    assert prompt.index('Earlier clarification') < prompt.index('Which size?')
 
 
 def test_code_review_prompt_uses_checkout_and_approved_document(client, agent, idle, tmp_path):
