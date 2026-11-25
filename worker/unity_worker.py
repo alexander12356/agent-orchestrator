@@ -14,6 +14,13 @@ from typing import Any
 import websockets
 
 RATE_LIMIT_RE = re.compile(r"rate.?limit|usage.?limit|quota exceeded|\b429\b|try again later", re.I)
+# A plain text line has to read like a CLI error report before it is checked for a limit.
+ERROR_LINE_RE = re.compile(
+    r"^(?:\W{0,3}|\[[^\]\n]{1,40}\]\s*|\d{2}:\d{2}(?::\d{2})?\W{1,3})"
+    r"(?:error|api\s*error|fatal|exception|traceback|uncaught|rate.?limit|usage.?limit|quota|too\s+many\s+requests|reconnecting|retrying)\b",
+    re.I,
+)
+RATE_LIMIT_TAIL_LINES = 20
 KIMI_NODE = Path("/mnt/c/Program Files/nodejs/node.exe")
 KIMI_ENTRY = Path("/mnt/e/WSL/ZelyaKimiWindows/node_modules/@moonshot-ai/kimi-code/dist/main.mjs")
 ZCODE_NODE = Path("/mnt/c/Program Files/nodejs/node.exe")
@@ -30,6 +37,37 @@ def windows_path(path: Path) -> str:
     if text.startswith("/mnt/") and len(text) > 6 and text[6] == "/":
         return f"{text[5].upper()}:\\{text[7:].replace('/', '\\')}"
     return str(path)
+
+
+def rate_limited_line(text: str) -> bool:
+    """Whether an output line reports a spent subscription limit.
+
+    Only error reports count: a JSON event that carries an error, or a text line that
+    reads like an error report. Agent prose and tool results may mention limits without
+    hitting one.
+    """
+    if not RATE_LIMIT_RE.search(text):
+        return False
+    stripped = text.lstrip()
+    if not stripped.startswith("{"):
+        return ERROR_LINE_RE.match(stripped) is not None
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    kind = f"{data.get('type', '')} {data.get('subtype', '')}".lower()
+    return data.get("is_error") is True or "error" in kind or "failed" in kind or "error" in data
+
+
+def limited_in_tail(lines: list[str]) -> bool:
+    # JSON keeps its event rule even here, so a failed run that ends with a non-error
+    # event quoting a document is not mistaken for a limit.
+    for line in lines[-RATE_LIMIT_TAIL_LINES:]:
+        if rate_limited_line(line) if line.lstrip().startswith("{") else RATE_LIMIT_RE.search(line):
+            return True
+    return False
 
 
 def kimi_environment(config: dict[str, Any]) -> dict[str, str]:
@@ -236,16 +274,29 @@ class UnityWorker:
         lines: list[str] = []
         limited = False
 
-        async def consume() -> None:
+        async def handle_line(raw: bytes) -> bool:
             nonlocal limited
+            text = raw.decode("utf-8", errors="replace")
+            lines.append(text)
+            await self.log(task_id, text)
+            if not limited and rate_limited_line(text):
+                limited = True
+                await self.terminate_process(process)
+                return False
+            return True
+
+        async def consume() -> None:
             assert process.stdout
-            while raw := await process.stdout.readline():
-                text = raw.decode("utf-8", errors="replace")
-                lines.append(text)
-                await self.log(task_id, text)
-                if RATE_LIMIT_RE.search(text) and not limited:
-                    limited = True
-                    await self.terminate_process(process)
+            # Read by raw chunks: one stream-json event may be a line far above the 64 KiB readline limit.
+            buffer = b""
+            while chunk := await process.stdout.read(65536):
+                buffer += chunk
+                while (end := buffer.find(b"\n")) >= 0:
+                    line, buffer = buffer[: end + 1], buffer[end + 1 :]
+                    if not await handle_line(line):
+                        return
+            if buffer:
+                await handle_line(buffer)
 
         consumer = asyncio.create_task(consume())
         timed_out = False
@@ -261,6 +312,12 @@ class UnityWorker:
             await self.finish_consumer(consumer)
             self.processes.pop(task_id, None)
         output = "".join(lines)
+        # A failed run is judged by the end of its output too: a text CLI may report the
+        # limit on a line that does not look like an error report.
+        if process.returncode == 0:
+            limited = False
+        elif not limited and not timed_out and limited_in_tail(lines):
+            limited = True
         usage = parse_usage(prompt, output)
         return {"exit_code": process.returncode or 0, "output": output, "rate_limited": limited, "timed_out": timed_out, **usage}
 
@@ -326,7 +383,7 @@ class UnityWorker:
             review = message.get("review_comments_content", "")
             prompt = f"{config.get('role_prompt', '')}\nРеализуй задачу по {docs}.\n"
             if review:
-                prompt += f"Замечания прошлого ревью:\n{review}\n"
+                prompt += f"Замечания прошлого ревью (comments — блокеры, исправить обязательно; notes — учесть):\n{review}\n"
             prompt += "Вноси только необходимые изменения. Не выполняй git commit/push: это сделает воркер."
             selected, result = await self.run_with_fallback(task_id, path, prompt, config, triggers)
             unity_status = await self.run_unity(path, task_id)

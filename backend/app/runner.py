@@ -9,6 +9,13 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 RATE_LIMIT_RE = re.compile(r"rate.?limit|usage.?limit|quota exceeded|\b429\b|try again later", re.I)
+# A plain text line has to read like a CLI error report before it is checked for a limit.
+ERROR_LINE_RE = re.compile(
+    r"^(?:\W{0,3}|\[[^\]\n]{1,40}\]\s*|\d{2}:\d{2}(?::\d{2})?\W{1,3})"
+    r"(?:error|api\s*error|fatal|exception|traceback|uncaught|rate.?limit|usage.?limit|quota|too\s+many\s+requests|reconnecting|retrying)\b",
+    re.I,
+)
+RATE_LIMIT_TAIL_LINES = 20
 KIMI_NODE = Path("/home/paperclip/.local/opt/node-v24.15.0-linux-x64/bin/node")
 KIMI_ENTRY = Path("/mnt/e/WSL/ZelyaKimiWindows/node_modules/@moonshot-ai/kimi-code/dist/main.mjs")
 KIMI_HOME = Path("/mnt/c/Users/Meku/.kimi-code")
@@ -66,7 +73,7 @@ class ProcessRunner:
             thinking = visible.thinking
             if self.log_callback and visible.text:
                 await self.log_callback(visible.text)
-            if RATE_LIMIT_RE.search(text) and not limited:
+            if not limited and rate_limited_line(text):
                 limited = True
                 if self.rate_limit_callback:
                     await self.rate_limit_callback()
@@ -109,10 +116,45 @@ class ProcessRunner:
                 await process.wait()
             raise
         output = "".join(lines)
+        # A failed run is judged by the end of its output too: a text CLI may report the
+        # limit on a line that does not look like an error report.
+        if not limited and (process.returncode or 0) != 0 and limited_in_tail(lines):
+            limited = True
         usage = extract_usage(output)
         if not usage:
             usage = estimate_usage(prompt, output)
         return RunResult(process.returncode or 0, output, **usage, rate_limited=limited)
+
+
+def rate_limited_line(text: str) -> bool:
+    """Whether an output line reports a spent subscription limit.
+
+    Only error reports count: a JSON event that carries an error, or a text line that
+    reads like an error report. Agent prose and tool results may mention limits without
+    hitting one.
+    """
+    if not RATE_LIMIT_RE.search(text):
+        return False
+    stripped = text.lstrip()
+    if not stripped.startswith("{"):
+        return ERROR_LINE_RE.match(stripped) is not None
+    try:
+        data = json.loads(stripped)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    kind = f"{data.get('type', '')} {data.get('subtype', '')}".lower()
+    return data.get("is_error") is True or "error" in kind or "failed" in kind or "error" in data
+
+
+def limited_in_tail(lines: list[str]) -> bool:
+    # JSON keeps its event rule even here, so a failed run that ends with a non-error
+    # event quoting a document is not mistaken for a limit.
+    for line in lines[-RATE_LIMIT_TAIL_LINES:]:
+        if rate_limited_line(line) if line.lstrip().startswith("{") else RATE_LIMIT_RE.search(line):
+            return True
+    return False
 
 
 def build_command(config: dict[str, Any], prompt: str, cwd: Path, stage: int = 0, repo: Path | None = None) -> list[str]:

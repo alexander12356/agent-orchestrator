@@ -2,7 +2,7 @@ import asyncio
 import sys
 from pathlib import Path
 
-from app.runner import ProcessRunner, build_command, cli_environment, estimate_usage, extract_usage, present_log_line
+from app.runner import ProcessRunner, build_command, cli_environment, estimate_usage, extract_usage, present_log_line, rate_limited_line
 
 
 def test_codex_runs_outside_the_task_directory():
@@ -148,3 +148,37 @@ def test_long_stream_lines_are_read_instead_of_failing(monkeypatch, tmp_path):
 
 def test_usage_fallback_is_marked_estimated():
     assert estimate_usage('some prompt', 'some output')['estimated'] is True
+
+
+def test_limit_is_reported_only_by_error_lines():
+    assert rate_limited_line("ERROR: You've hit your usage limit.")
+    assert rate_limited_line('[12:00:01] API Error: 429 Too Many Requests')
+    assert rate_limited_line('{"type":"result","subtype":"success","is_error":true,"result":"usage limit reached"}')
+    assert rate_limited_line('{"type":"error","message":"rate limit exceeded"}')
+    assert not rate_limited_line('## Rate limits')
+    assert not rate_limited_line('The API returns 429 when the rate limit is exceeded.')
+    assert not rate_limited_line('{"type":"assistant","message":{"content":[{"type":"text","text":"HTTP 429 means rate limit"}]}}')
+    assert not rate_limited_line('{"type":"result","subtype":"success","is_error":false,"result":"Document mentions a rate limit"}')
+
+
+def run_script(monkeypatch, tmp_path, body):
+    script = tmp_path / 'cli.py'
+    script.write_text('import sys, time\n' + body, encoding='utf-8')
+    monkeypatch.setattr('app.runner.build_command', lambda *args, **kwargs: [sys.executable, str(script)])
+    return asyncio.run(ProcessRunner().run({'cli': 'custom'}, 'prompt', tmp_path, {}, 1))
+
+
+def test_limit_words_in_agent_output_do_not_count(monkeypatch, tmp_path):
+    result = run_script(monkeypatch, tmp_path, "print('HTTP 429 means the rate limit is exceeded.')\nprint('done')\n")
+    assert (result.exit_code, result.rate_limited) == (0, False)
+
+
+def test_limit_reported_by_a_failed_run_counts_even_on_a_plain_line(monkeypatch, tmp_path):
+    result = run_script(monkeypatch, tmp_path, "print(\"You've hit your usage limit. Try again later.\")\nsys.exit(1)\n")
+    assert (result.exit_code, result.rate_limited) == (1, True)
+
+
+def test_limit_on_an_error_line_stops_the_cli_at_once(monkeypatch, tmp_path):
+    result = run_script(monkeypatch, tmp_path, "print('ERROR: rate limit exceeded', flush=True)\ntime.sleep(30)\n")
+    assert result.rate_limited is True
+    assert result.timed_out is False

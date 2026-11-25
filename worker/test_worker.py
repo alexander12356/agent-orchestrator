@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -240,3 +241,43 @@ def test_timeout_is_reported_with_the_limit(tmp_path):
     worker, _ = fallback_worker(tmp_path, [agent_result(-15, timed_out=True), agent_result(0)])
     run_fallback(worker, {'primary': KIMI, 'fallback': [ZCODE]}, {'timeout': True, 'timeout_minutes': 7})
     assert any('таймаут 7 мин' in line for line in worker.logs)
+
+
+def test_limit_is_reported_only_by_error_lines():
+    assert module.rate_limited_line("ERROR: You've hit your usage limit.")
+    assert module.rate_limited_line('{"type":"error","message":"rate limit exceeded"}')
+    assert not module.rate_limited_line('HTTP 429 means the rate limit is exceeded.')
+    assert not module.rate_limited_line('{"type":"assistant","message":{"content":[{"type":"text","text":"rate limit"}]}}')
+
+
+def run_cli(tmp_path, body):
+    worker = make_worker(tmp_path)
+    script = tmp_path / 'cli.py'
+    script.write_text('import sys, time\n' + body, encoding='utf-8')
+    logs = []
+
+    async def log(task_id, text):
+        logs.append(text)
+
+    worker.log = log
+    config = {'cli': 'custom', 'command': f'"{sys.executable}" "{script}"'}
+    return asyncio.run(worker.run_agent(1, tmp_path, config, 'implement', 1))
+
+
+def test_run_agent_reads_long_lines_and_ignores_limit_words_in_prose(tmp_path):
+    result = run_cli(tmp_path, "sys.stdout.write('x' * 200_000 + '\\n')\nsys.stdout.write('HTTP 429 means the rate limit is exceeded.\\n')\n")
+    assert result['exit_code'] == 0
+    assert result['rate_limited'] is False
+    assert result['output'] == 'x' * 200_000 + '\nHTTP 429 means the rate limit is exceeded.\n'
+
+
+def test_run_agent_reports_a_limit_of_a_failed_cli(tmp_path):
+    result = run_cli(tmp_path, "print(\"You've hit your usage limit. Try again later.\")\nsys.exit(1)\n")
+    assert (result['exit_code'], result['rate_limited']) == (1, True)
+
+
+def test_run_agent_stops_a_cli_that_reports_a_limit(tmp_path):
+    result = run_cli(tmp_path, "print('ERROR: rate limit exceeded', flush=True)\ntime.sleep(30)\n")
+    assert result['rate_limited'] is True
+    assert result['timed_out'] is False
+    assert result['exit_code'] != 0
