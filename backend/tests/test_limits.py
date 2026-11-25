@@ -76,18 +76,15 @@ def test_revision_prompt_names_previous_document_and_new_output(client, agent, i
 
     assert f"Предыдущая версия: {directory / '01_tech_doc_v1.md'}" in prompt
     assert f"Замечания ревью: {directory / '02_doc_review_v1.json'}" in prompt
-    assert "Замечания по прежнему формату сверяй со структурой ниже" in prompt
+    assert "Исправь только актуальные блокеры из comments" in prompt
     assert f"Запиши полный техдокумент в {directory / '01_tech_doc_v2.md'}" in prompt
-    sections = ['Что изменится', 'Сценарии использования', 'Схема экрана', 'Реализация', 'Зависимости']
+    sections = ['Сущности и связи', 'Алгоритм', 'Сценарии']
     positions = [prompt.index(f'«{section}»') for section in sections]
     assert positions == sorted(positions)
     assert "Сохрани согласованное поведение" in prompt
-    assert "Приёмку описывай один раз в сценариях" in prompt
-    assert "«Как проверить»" not in prompt
-    assert "Mermaid block-beta" in prompt
-    assert "Mermaid flowchart" in prompt
-    assert "подпиши направленные стрелки" in prompt
-    assert "вызывающий компонент, вход и наблюдаемый эффект" in prompt
+    assert "Покажи в Mermaid" in prompt
+    assert "Исключи списки публичных методов" in prompt
+    assert "Mermaid block-beta" not in prompt
 
 
 def test_document_review_uses_current_scenario_format(client, agent, idle):
@@ -96,14 +93,20 @@ def test_document_review_uses_current_scenario_format(client, agent, idle):
     (directory / '01_tech_doc_v2.md').touch()
     (directory / '02_doc_review_v1.json').touch()
 
-    prompt = dispatcher._prompt(task, agent, 2, 2)
+    first_answer = directory / '01_answers_v9.md'
+    later_answer = directory / '01_answers_v10.md'
+    first_answer.touch()
+    later_answer.touch()
+
+    for stage in (1, 2):
+        prompt = dispatcher._prompt(task, agent, stage, 2)
+        assert f"Согласованные ответы в порядке версий: {first_answer}, {later_answer}" in prompt
 
     assert f"Документ: {directory / '01_tech_doc_v2.md'}" in prompt
     assert f"Предыдущий вердикт: {directory / '02_doc_review_v1.json'}" in prompt
-    assert "Читай приёмку внутри сценариев" in prompt
-    assert "Отдельный раздел ручных проверок не требуется" in prompt
-    assert "Описание EventSystem и hit-test нужно только если ТЗ меняет этот путь" in prompt
-    assert "Прошлые замечания оцени по актуальному формату" in prompt
+    assert "Для каждого обязательного сценария проследи путь" in prompt
+    assert "Отсутствие имён методов, их сигнатур или служебных шагов не является блокером" in prompt
+    assert "Выбор реализации оставь разработчику" in prompt
 
 
 def test_code_review_prompt_uses_checkout_and_approved_document(client, agent, idle, tmp_path):
