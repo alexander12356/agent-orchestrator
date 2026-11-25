@@ -293,13 +293,20 @@ class Dispatcher:
         directory = task_dir(task["id"])
         artifact = directory / STAGE_FILES[stage].format(attempt=attempt)
         inputs = [f"ТЗ: {directory / '00_task.md'}"]
+        chat = directory / "00_yougile_chat.md"
+        if chat.is_file():
+            inputs.append(f"Чат задачи: {chat}")
         if evidence is not None:
-            lines = [f"Файлы репозитория, ветка {repository_ref}, лежат в {directory / 'repo'}:"]
-            lines.extend(f"- {directory / 'repo' / name}" for name in evidence)
+            lines = [f"Снимок {repository_ref}: {directory / 'repo'}. Пути относительно снимка:"]
+            lines.extend(f"- {name}" for name in evidence)
             if missing:
                 lines.append("В снимке нет: " + ", ".join(missing))
-            lines.append("Прочитай только ТЗ, чат задачи, перечисленные файлы и явно указанные замечания или ответы. Не открывай GitHub, другие каталоги сервера, чужие задачи и базу. Если файла нет, запиши это в результат и не выдумывай имена.")
             inputs.append("\n".join(lines))
+        inputs.append(
+            "Используй указанные артефакты и нужные для задачи файлы из списка снимка. "
+            "Отметь недостающие сведения. Не открывай GitHub, другие каталоги сервера, чужие задачи и базу."
+        )
+        doc = latest_version(directory, "01_tech_doc_v*.md")
         if stage == 1:
             review = latest_version(directory, "02_doc_review_v*.json")
             answers = latest_version(directory, "01_answers_v*.md")
@@ -307,41 +314,46 @@ class Dispatcher:
                 inputs.append(f"Замечания ревью: {review} (comments — блокеры, исправить обязательно; notes — учесть, если не противоречат ТЗ)")
             if answers:
                 inputs.append(f"Ответы на вопросы: {answers}")
-            result = f"Создай Markdown-документ {artifact}. Отдельно запиши {directory / f'01_questions_v{attempt}.json'} по контракту {{\"has_questions\": boolean, \"questions\": string[]}}. Если вопросов нет, используй has_questions=false."
-        elif stage == 2:
-            doc = latest_version(directory, "01_tech_doc_v*.md")
-            if not doc:
-                raise RuntimeError("Нет технического документа для ревью")
-            inputs.append(f"Документ: {doc}")
+            if doc and (review or answers):
+                inputs.append(f"Предыдущая версия: {doc}. Внеси нужные исправления и запиши новый полный документ.")
             result = (
-                f"Проверь документ и запиши вердикт в {artifact} по контракту {VERDICT_CONTRACT}.\n"
-                "Ты настроен на одобрение: REJECTED — только за блокер, который можешь подтвердить, назвав место в документе. "
-                "Блокеры: документ не покрывает требование ТЗ; названные в нём файлы, классы или пути отсутствуют в снимке; пункты противоречат друг другу; "
-                "пункт нереализуем без решения, которое должен принять автор; нет способа проверить результат. "
-                "В comments перечисли только блокеры, каждый с местом и нужным исправлением. "
-                "Стиль, формулировки, улучшения и вопросы, не мешающие реализации, — в notes: они не мешают APPROVED. "
-                "При REJECTED comments не может быть пустым."
+                f"Запиши полный техдокумент в {artifact}. Даже при открытых вопросах сохрани документ и обозначь открытые решения. "
+                f"Запиши вопросы в {directory / f'01_questions_v{attempt}.json'} как "
+                '{"has_questions": boolean, "questions": string[]}. Без вопросов укажи false и [].'
             )
         else:
-            report = latest_version(directory, "03_impl_report_v*.md")
-            if not report:
-                raise RuntimeError("Нет отчёта реализации для ревью")
-            inputs.append(f"Отчет реализации: {report}")
+            if stage == 2:
+                if not doc:
+                    raise RuntimeError("Нет технического документа для ревью")
+                inputs.append(f"Документ: {doc}")
+                previous = latest_version(directory, "02_doc_review_v*.json")
+                check = "Сверь документ с ТЗ. Проверь полноту, непротиворечивость, ссылки на существующий код, реализуемость и проверяемость результата."
+            else:
+                report = latest_version(directory, "03_impl_report_v*.md")
+                if not report:
+                    raise RuntimeError("Нет отчёта реализации для ревью")
+                inputs.append(f"Отчёт реализации: {report}")
+                if doc:
+                    inputs.append(f"Утверждённый техдокумент: {doc}")
+                previous = latest_version(directory, "04_code_review_v*.json")
+                check = (
+                    "Сверь реализацию в снимке с ТЗ и утверждённым документом. Отчёт используй как указатель на изменения и проверки. "
+                    "Ищи нарушения требований, регрессии и достижимые дефекты, в том числе в Unity lifecycle и обработке null."
+                )
+            if previous:
+                inputs.append(f"Предыдущий вердикт: {previous}")
             result = (
-                f"Проверь реализацию через доступные GitHub/CLI инструменты и запиши вердикт в {artifact} по контракту {VERDICT_CONTRACT}.\n"
-                "Ты настроен на одобрение: REJECTED — только за блокер, который можешь подтвердить, назвав файл и место. "
-                "Блокеры: изменение расходится с утверждённым документом или ТЗ; явный дефект, который приведёт к ошибке, потере данных или утечке; "
-                "сломано существующее поведение без причины; в изменённом коде Unity нет нужных проверок на null и lifecycle. "
-                "В comments перечисли только блокеры, каждый с местом и нужным исправлением. "
-                "Стиль, именование, рефакторинг и возможные улучшения — в notes: они не мешают APPROVED. "
-                "При REJECTED comments не может быть пустым."
+                f"{check}\nЗапиши вердикт в {artifact} по контракту {VERDICT_CONTRACT}. "
+                "Отклоняй только за подтверждённый блокер. В comments укажи место, влияние и исправление каждого блокера. "
+                "При REJECTED comments не может быть пустым. При APPROVED оставь comments пустым. "
+                "Неблокирующие замечания укажи в notes."
             )
         if previous_error:
             inputs.append(f"Предыдущая попытка этого этапа не завершена: {previous_error}\nУстрани причину и обязательно создай файл результата по контракту.")
         return (
             f"{agent['role_prompt']}\n\nЗадача #{task['id']}: {task['title']}\n"
             + "\n".join(inputs)
-            + f"\n{result}\nРаботай автономно. Не изменяй служебные JSON вне заданного формата."
+            + f"\n{result}\nЗапиши результат только в названные выходные файлы."
         )
 
     @staticmethod

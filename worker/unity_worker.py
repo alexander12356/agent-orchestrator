@@ -449,7 +449,10 @@ class UnityWorker:
             path = await self.prepare_worktree(task_id, message["branch_name"])
             docs = path / "orchestrator-tech-doc.md"
             details_path = path / PR_DETAILS_FILE
-            docs.write_text(message.get("tech_doc_content", ""), encoding="utf-8")
+            tech_doc = message.get("tech_doc_content", "")
+            if not tech_doc.strip():
+                raise RuntimeError("Нет утверждённого техдокумента для реализации")
+            docs.write_text(tech_doc, encoding="utf-8")
             details_path.unlink(missing_ok=True)
             title = str(message.get("task_title") or "").strip() or f"Task {task_id}"
             description = str(message.get("task_description") or "").strip()
@@ -463,11 +466,9 @@ class UnityWorker:
             prompt += (
                 "Вноси только необходимые изменения. Не выполняй git commit/push и не создавай PR: это сделает воркер.\n"
                 f"После реализации обязательно создай {details_path} по контракту {PR_DETAILS_CONTRACT}.\n"
-                "Заполни его по фактически внесённым изменениям конкретно и без общих фраз: purpose — зачем нужна задача, "
-                "changes — что сделано, implementation — какими способами и в каких местах это реализовано, "
-                "before и after — поведение до и после изменений. В validation перечисли только проверки, которые ты действительно "
-                "запустил, с командой и результатом; если таких нет, оставь список пустым. В review_focus укажи важные для ревью "
-                "решения, ограничения или риски либо оставь список пустым. Не включай в JSON незапущенные проверки и выдуманные результаты."
+                "Кратко укажи цель, затронутые места, способ реализации и поведение до и после. "
+                "В validation укажи команды реально выполненных проверок и их результаты. "
+                "В review_focus укажи важные для ревью решения или ограничения. При отсутствии данных оставь соответствующий список пустым."
             )
             selected, result = await self.run_with_fallback(task_id, path, prompt, config, triggers)
             unity_status = await self.run_unity(path, task_id)
@@ -485,7 +486,7 @@ class UnityWorker:
                 str(message.get("external_issue_key") or ""), str(message.get("external_issue_url") or ""),
             )
             pr_url = await self.upsert_pr(path, message["branch_name"], title, pr_body)
-            report = f"# Отчет реализации\n\n{pr_body}\n\n## Вывод CLI\n\n```text\n{result['output'][-20000:]}\n```"
+            report = f"# Отчет реализации\n\nPR: {pr_url}\n\n{pr_body}"
             await self.send({"type": "TASK_COMPLETED", "task_id": task_id, "run_id": run_id, "report": report, "pr_url": pr_url, "worktree_path": str(path), "cli_used": selected.get("cli"), "model_used": selected.get("model", ""), "is_fallback": selected != config["primary"], **{k: v for k, v in result.items() if k in ("input_tokens", "output_tokens", "cache_tokens", "estimated")}})
             await self.send({"type": "TASK_META", "task_id": task_id, "tokens_estimated": result.get("estimated", False)})
         except asyncio.CancelledError:

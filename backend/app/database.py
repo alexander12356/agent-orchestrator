@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .config import settings
+from .role_prompts import update_role_prompts
 
 
 SCHEMA = """
@@ -135,6 +136,7 @@ def init_db() -> None:
             "SELECT id, external_issue_key FROM tasks WHERE branch_name='feat/task-' || id AND NOT EXISTS (SELECT 1 FROM stage_runs WHERE task_id=tasks.id AND stage=3)"
         ).fetchall()
         conn.executemany("UPDATE tasks SET branch_name=? WHERE id=?", [(branch_name(row["id"], row["external_issue_key"]), row["id"]) for row in legacy])
+        update_role_prompts(conn)
 
 
 @contextmanager

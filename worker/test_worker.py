@@ -400,7 +400,8 @@ def test_assign_creates_pr_from_summary_and_keeps_service_files_out_of_commit(tm
     completed = next(message for message in sent if message['type'] == 'TASK_COMPLETED')
     assert completed['pr_url'] == 'https://github.example/pull/42'
     assert body in completed['report']
-    assert 'raw CLI output' in completed['report']
+    assert completed['pr_url'] in completed['report']
+    assert 'raw CLI output' not in completed['report']
 
 
 def test_existing_pr_is_updated_instead_of_reused_unchanged(tmp_path):

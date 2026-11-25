@@ -66,6 +66,34 @@ def save_limits(client, **values):
     assert client.put('/api/settings', json=values).status_code == 200
 
 
+def test_revision_prompt_names_previous_document_and_new_output(client, agent, idle):
+    task = make_task(client, agent)
+    directory = task_dir(task['id'])
+    (directory / '01_tech_doc_v1.md').touch()
+    (directory / '02_doc_review_v1.json').touch()
+
+    prompt = dispatcher._prompt(task, agent, 1, 2)
+
+    assert f"Предыдущая версия: {directory / '01_tech_doc_v1.md'}" in prompt
+    assert f"Замечания ревью: {directory / '02_doc_review_v1.json'}" in prompt
+    assert f"Запиши полный техдокумент в {directory / '01_tech_doc_v2.md'}" in prompt
+
+
+def test_code_review_prompt_uses_snapshot_and_approved_document(client, agent, idle):
+    task = make_task(client, agent)
+    directory = task_dir(task['id'])
+    (directory / '01_tech_doc_v1.md').touch()
+    (directory / '03_impl_report_v1.md').touch()
+
+    prompt = dispatcher._prompt(task, agent, 4, 1, evidence=['Assets/Game.cs'], repository_ref='task-1')
+
+    assert f"Утверждённый техдокумент: {directory / '01_tech_doc_v1.md'}" in prompt
+    assert "- Assets/Game.cs" in prompt
+    assert "Сверь реализацию в снимке" in prompt
+    assert '"notes": string[]' in prompt
+    assert "через доступные GitHub" not in prompt
+
+
 def test_missing_result_is_retried_with_what_went_wrong(client, agent, idle, monkeypatch):
     task = make_task(client, agent)
     prompts = fake_runner(monkeypatch, [RunResult(0, 'nothing written'), writes('01_tech_doc_v2.md', '# Doc')])
@@ -273,7 +301,7 @@ def test_reviewer_is_asked_for_blockers_and_notes_separately(client, agent, idle
     prompt = dispatcher._prompt(task, agent, 2, 1)
 
     assert '"notes": string[]' in prompt
-    assert 'Ты настроен на одобрение' in prompt
+    assert 'Отклоняй только за подтверждённый блокер' in prompt
     assert 'При REJECTED comments не может быть пустым' in prompt
 
 
