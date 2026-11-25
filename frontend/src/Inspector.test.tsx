@@ -13,7 +13,8 @@ vi.mock('mermaid', () => ({
   },
 }));
 
-vi.mock('./api', () => ({
+vi.mock('./api', async (importOriginal) => ({
+  ...await importOriginal<typeof import('./api')>(),
   api: vi.fn(async (path: string) => (String(path).includes('artifacts') ? [{ name: '01_tech_doc_v1.md', path: '/tmp/01_tech_doc_v1.md', size: 20 }] : {})),
   fmtTokens: (value: number) => String(value),
   spentTokens: (run: { input_tokens?: number; output_tokens?: number; cache_tokens?: number }) => (run.input_tokens || 0) + (run.output_tokens || 0) + (run.cache_tokens || 0),
@@ -67,5 +68,18 @@ describe('Inspector', () => {
   it('offers nothing to continue for a running task', () => {
     render(<Inspector {...props} tab="description" />);
     expect(screen.queryByRole('button', { name: 'Продолжить' })).not.toBeInTheDocument();
+  });
+
+  it('offers the pipeline and the selected eligible stage as separate actions', async () => {
+    const paused = { ...task, status: 'stage_ready', current_stage: 2, stage_agents: { 1: 1, 2: 1, 3: 1 } };
+    const { rerender } = render(<Inspector {...props} task={paused} stage={3} tab="stage" />);
+    expect(screen.getByRole('button', { name: 'Запустить только этот этап' })).toBeDisabled();
+
+    rerender(<Inspector {...props} task={paused} stage={1} tab="stage" />);
+    fireEvent.click(screen.getByRole('button', { name: 'Запустить только этот этап' }));
+    await waitFor(() => expect(api).toHaveBeenCalledWith('/tasks/7/start?stage=1', expect.objectContaining({ method: 'POST' })));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Запустить пайплайн' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Запустить пайплайн' }));
+    await waitFor(() => expect(api).toHaveBeenCalledWith('/tasks/7/start?pipeline=true', expect.objectContaining({ method: 'POST' })));
   });
 });

@@ -1,6 +1,6 @@
 import { Check, ChevronRight, ListTodo, LockKeyhole, Play, Plus, Search, Square, Trash2, UserRound } from 'lucide-react';
 import { FormEvent, useMemo, useState } from 'react';
-import { api } from './api';
+import { api, canStartPipeline } from './api';
 import { Avatar, Empty, Modal, StageBadge } from './components';
 import { Agent, Task } from './types';
 
@@ -12,7 +12,7 @@ export default function Tasks({ tasks, agents, reload, openTask, onDeleted, noti
   const [editing, setEditing] = useState<Task | 'new' | null>(null);
   const [starting, setStarting] = useState<number | null>(null);
   const visible = useMemo(() => tasks.filter(task => {
-    const byFilter = filter === 'all' || (filter === 'open' && task.status === 'open') || (filter === 'active' && ['running', 'queued', 'waiting_worker'].includes(task.status)) || (filter === 'waiting' && ['blocked_main', 'waiting_answer', 'needs_human', 'error'].includes(task.status)) || (filter === 'pr' && task.current_stage === 5) || (filter === 'done' && task.current_stage === 6);
+    const byFilter = filter === 'all' || (filter === 'open' && task.status === 'open') || (filter === 'active' && ['running', 'queued', 'waiting_worker'].includes(task.status)) || (filter === 'waiting' && ['blocked_main', 'waiting_answer', 'stage_ready', 'needs_human', 'error'].includes(task.status)) || (filter === 'pr' && task.current_stage === 5) || (filter === 'done' && task.current_stage === 6);
     return byFilter && `${task.id} ${task.title} ${task.description} ${task.external_issue_key || ''} ${task.milestone || ''} ${task.sprint || ''}`.toLowerCase().includes(search.toLowerCase());
   }), [tasks, filter, search]);
   const remove = async (task: Task) => {
@@ -46,7 +46,7 @@ export default function Tasks({ tasks, agents, reload, openTask, onDeleted, noti
         <td className="px-3 py-4"><StageBadge task={task}/></td>
         <td className="px-3 py-4">{task.status === 'open' || task.current_stage === 0 ? <span className="text-slate-600">—</span> : task.current_stage === 5 ? <span className="flex items-center gap-2 text-xs text-slate-400"><UserRound size={18}/> Человек</span> : <span className="flex items-center gap-2 text-xs"><Avatar agent={task.current_agent}/><span>{task.current_agent?.name || '—'}</span></span>}</td>
         <td className="max-w-xs px-3 py-4">{task.dependencies.length ? <div className="flex flex-col gap-1">{task.dependencies.map(dep => <span key={dep.id} className={`flex items-center gap-1.5 text-[11px] ${dep.merged_to_main ? 'text-slate-500' : 'text-amber-300/70'}`}>{dep.merged_to_main ? <Check size={12}/> : <LockKeyhole size={11}/>} #{dep.id} {dep.title}</span>)}</div> : <span className="text-slate-700">—</span>}</td>
-        <td className="px-3"><div className="flex opacity-0 transition group-hover:opacity-100">{task.status === 'open' || task.status === 'needs_human' ? <button className="icon-btn !text-emerald-400" title={task.status === 'open' ? 'Запустить пайплайн' : 'Продолжить'} disabled={starting === task.id} onClick={() => start(task)}><Play size={16}/></button> : null}<button className="icon-btn" title="Редактировать" onClick={() => setEditing(task)}><ChevronRight size={17}/></button><button className="icon-btn !text-rose-400" title="Удалить задачу" onClick={() => remove(task)}><Trash2 size={16}/></button></div></td>
+        <td className="px-3"><div className="flex opacity-0 transition group-hover:opacity-100">{canStartPipeline(task) && <button className="icon-btn !text-emerald-400" title={task.status === 'needs_human' ? 'Продолжить' : 'Запустить пайплайн'} disabled={starting === task.id} onClick={() => start(task)}><Play size={16}/></button>}<button className="icon-btn" title="Редактировать" onClick={() => setEditing(task)}><ChevronRight size={17}/></button><button className="icon-btn !text-rose-400" title="Удалить задачу" onClick={() => remove(task)}><Trash2 size={16}/></button></div></td>
       </tr>)}</tbody></table></div>
       {!visible.length && <Empty icon={<ListTodo size={40}/>} title="Задач не найдено" text="Измените фильтр или создайте новую задачу"/>}
     </section>

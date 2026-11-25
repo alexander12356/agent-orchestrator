@@ -164,6 +164,8 @@ class Dispatcher:
                 agents = {row["id"]: decode_agent(row) for row in conn.execute("SELECT * FROM agents")}
             for task in tasks:
                 stage = task["current_stage"]
+                if task["id"] in self.active or task["id"] in self.stop_requested:
+                    continue
                 agent_id = task["stage_agents"].get(str(stage), task["stage_agents"].get(stage))
                 agent = agents.get(agent_id)
                 if not agent or sum(1 for active_agent in self.active.values() if active_agent == agent_id) >= agent["concurrency_limit"]:
@@ -181,7 +183,7 @@ class Dispatcher:
         with connect() as conn:
             row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
             task = decode_task(row) if row else None
-            if not task or task["status"] in ("open", "done", "blocked_main", "waiting_answer", "waiting_pr", "running"):
+            if not task or task["status"] not in ("queued", "waiting_worker"):
                 return
         if settings.auto_start:
             await self.schedule()
@@ -477,7 +479,7 @@ class Dispatcher:
             )
         if not success:
             raise StageFailure(error, retryable=not result.timed_out and not result.rate_limited and result.exit_code != 127)
-        await self._process_artifact(task["id"], stage, attempt)
+        await self._process_artifact(task["id"], stage, attempt, from_run=True)
 
     async def _run_worker(self, task: dict[str, Any], agent: dict[str, Any], attempt: int, run_id: int) -> None:
         directory = task_dir(task["id"])
@@ -501,7 +503,7 @@ class Dispatcher:
                 conn.execute("UPDATE tasks SET status='waiting_worker', updated_at=? WHERE id=?", (now(), task["id"]))
                 conn.execute("UPDATE stage_runs SET status='queued', finished_at=? WHERE id=?", (now(), run_id))
 
-    async def _process_artifact(self, task_id: int, stage: int, attempt: int) -> None:
+    async def _process_artifact(self, task_id: int, stage: int, attempt: int, *, from_run: bool = False) -> None:
         directory = task_dir(task_id)
         current_limits = limits()
         with transaction() as conn:
@@ -509,6 +511,8 @@ class Dispatcher:
             if not row:
                 return
             task = decode_task(row)
+            if from_run and (task["status"] != "running" or task["current_stage"] != stage):
+                return
             doc_returns, code_returns = task["doc_returns"], task["code_returns"]
             hold, hold_stage, issue_id = "", 0, ""
             if stage == 1:
@@ -541,6 +545,8 @@ class Dispatcher:
                 # The task stays on the review stage; only the return counter moves on.
                 conn.execute("UPDATE tasks SET doc_returns=?, code_returns=?, updated_at=? WHERE id=?", (doc_returns, code_returns, now(), task_id))
             else:
+                if status == "queued" and task["single_stage"]:
+                    status = "stage_ready"
                 conn.execute(
                     "UPDATE tasks SET current_stage=?, status=?, auto_retries=0, doc_returns=?, code_returns=?, hold_reason=NULL, updated_at=? WHERE id=?",
                     (next_stage, status, doc_returns, code_returns, now(), task_id),
@@ -567,7 +573,10 @@ class Dispatcher:
                 "UPDATE stage_runs SET artifact_path=?, cli_used=?, model_used=?, is_fallback=?, input_tokens=?, output_tokens=?, cache_tokens=?, tokens_estimated=?, status='completed', finished_at=? WHERE id=?",
                 (str(artifact), message.get("cli_used"), message.get("model_used", ""), int(message.get("is_fallback", False)), int(message.get("input_tokens", 0)), int(message.get("output_tokens", 0)), int(message.get("cache_tokens", 0)), int(message.get("tokens_estimated", message.get("estimated", False))), now(), run_id),
             )
-            conn.execute("UPDATE tasks SET pr_url=COALESCE(?, pr_url), worktree_path=?, current_stage=4, status='queued', auto_retries=0, hold_reason=NULL, updated_at=? WHERE id=?", (message.get("pr_url"), message.get("worktree_path"), now(), task_id))
+            conn.execute(
+                "UPDATE tasks SET pr_url=COALESCE(?, pr_url), worktree_path=?, current_stage=4, status=CASE WHEN single_stage THEN 'stage_ready' ELSE 'queued' END, auto_retries=0, hold_reason=NULL, updated_at=? WHERE id=?",
+                (message.get("pr_url"), message.get("worktree_path"), now(), task_id),
+            )
             self.active.pop(task_id, None)
         await self.schedule()
 
@@ -593,26 +602,48 @@ class Dispatcher:
             conn.execute("UPDATE tasks SET status='queued', updated_at=? WHERE id=?", (now(), task_id))
         await self.start(task_id)
 
-    async def start_open(self, task_id: int) -> None:
-        with connect() as conn:
-            cursor = conn.execute(
-                "UPDATE tasks SET status='queued', current_stage=CASE WHEN status='open' THEN 1 ELSE current_stage END, hold_reason=NULL, updated_at=? WHERE id=? AND status IN ('open', 'needs_human')",
-                (now(), task_id),
+    async def start_task(self, task_id: int, stage: int | None = None, pipeline: bool = False) -> None:
+        with transaction() as conn:
+            row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if not row:
+                raise ValueError("Задача не найдена")
+            task = decode_task(row)
+            allowed_statuses = ("open", "stage_ready", "needs_human", "error")
+            if stage is not None:
+                allowed_statuses += ("waiting_pr",)
+            if (
+                task["status"] not in allowed_statuses
+                or task["merged_to_main"]
+                or task_id in self.active
+                or task_id in self.stop_requested
+            ):
+                raise ValueError("Задача сейчас недоступна для запуска")
+            current_stage = 1 if task["status"] == "open" else task["current_stage"]
+            if stage is not None and stage > current_stage:
+                raise ValueError("Сначала завершите предыдущие этапы")
+            next_stage = current_stage if stage is None else stage
+            if not task["stage_agents"].get(next_stage):
+                raise ValueError(f"Назначьте бота на этап {next_stage}")
+            # A plain start on a human hold resumes the interrupted run mode.
+            single_stage = stage is not None or (not pipeline and task["status"] == "needs_human" and task["single_stage"])
+            conn.execute(
+                "UPDATE tasks SET status='queued', current_stage=?, single_stage=?, auto_retries=CASE WHEN status='needs_human' AND current_stage=? THEN auto_retries ELSE 0 END, hold_reason=NULL, updated_at=? WHERE id=?",
+                (next_stage, int(single_stage), next_stage, now(), task_id),
             )
-            if cursor.rowcount != 1:
-                raise ValueError("Задача не находится в статусе Open или «Нужен человек»")
         await self.start(task_id)
 
     async def restart(self, task_id: int, stage: int) -> None:
+        with connect() as conn:
+            task = conn.execute("SELECT status, current_stage FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if not task or task["status"] in ("open", "blocked_main", "done") or stage > task["current_stage"]:
+            raise ValueError("Сначала завершите предыдущие этапы")
+        if task_id in self.stop_requested:
+            raise ValueError("Перезапуск уже выполняется")
         self.stop_requested.add(task_id)
         await self._stop_run(task_id)
-        if stage == 3:
+        if stage == 3 or task["current_stage"] == 3:
             await hub.send({"type": "CANCEL_TASK", "task_id": task_id})
         with connect() as conn:
-            task = conn.execute("SELECT status FROM tasks WHERE id=?", (task_id,)).fetchone()
-            if not task or task["status"] == "open":
-                self.stop_requested.discard(task_id)
-                return
             conn.execute(
                 "UPDATE stage_runs SET status='error', error=?, finished_at=? WHERE task_id=? AND status='running'",
                 ("Остановлено перезапуском", now(), task_id),
@@ -651,9 +682,12 @@ class Dispatcher:
         if stage not in (1, 2, 4):
             raise ValueError("Принудительно можно утвердить только этапы 1, 2 и 4")
         with connect() as conn:
-            if conn.execute("SELECT 1 FROM tasks WHERE id=? AND status='open'", (task_id,)).fetchone():
-                return
+            task = conn.execute("SELECT status, current_stage, single_stage FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if not task or task["status"] in ("open", "blocked_main", "done") or stage != task["current_stage"]:
+                raise ValueError("Утвердить можно только текущий этап задач в работе")
             next_stage, status = {1: (2, "queued"), 2: (3, "queued"), 4: (5, "waiting_pr")}[stage]
+            if status == "queued" and task["single_stage"]:
+                status = "stage_ready"
             conn.execute(
                 "UPDATE tasks SET current_stage=?, status=?, auto_retries=0, hold_reason=NULL, doc_returns=COALESCE(?, doc_returns), code_returns=COALESCE(?, code_returns), updated_at=? WHERE id=?",
                 (next_stage, status, 0 if stage in (1, 2) else None, 0 if stage == 4 else None, now(), task_id),

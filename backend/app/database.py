@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     sprint TEXT,
     current_stage INTEGER NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'queued',
+    single_stage INTEGER NOT NULL DEFAULT 0,
     branch_name TEXT NOT NULL,
     pr_url TEXT,
     merged_to_main INTEGER NOT NULL DEFAULT 0,
@@ -123,6 +124,7 @@ def init_db() -> None:
             if column not in columns:
                 conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} TEXT")
         for column, definition in (
+            ("single_stage", "INTEGER NOT NULL DEFAULT 0"),
             ("auto_retries", "INTEGER NOT NULL DEFAULT 0"),
             ("doc_returns", "INTEGER NOT NULL DEFAULT 0"),
             ("code_returns", "INTEGER NOT NULL DEFAULT 0"),

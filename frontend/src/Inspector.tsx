@@ -2,7 +2,7 @@ import { Check, ExternalLink, Flame, FolderGit2, Hand, Play, RotateCcw, Send, Te
 import { memo, useEffect, useRef, useState } from 'react';
 import TaskDescription from './TaskDescription';
 import Markdown from './Markdown';
-import { api, fmtTokens, spentTokens, stageName } from './api';
+import { api, canStartPipeline, fmtTokens, spentTokens, stageName } from './api';
 import { latestDocumentArtifact } from './graphUtils';
 import { Artifact, Task } from './types';
 
@@ -39,9 +39,18 @@ export default function Inspector({ task, stage, requestedArtifact: _requestedAr
     return () => source.close();
   }, [task.id, stage]);
   useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [logs]);
-  const action = async (kind: 'restart' | 'approve' | 'merge' | 'resume') => {
+  const action = async (kind: 'stage' | 'pipeline' | 'restart' | 'approve' | 'merge' | 'resume') => {
+    const actions = {
+      stage: [`start?stage=${stage}`, 'Этап поставлен в очередь'],
+      pipeline: ['start?pipeline=true', 'Пайплайн поставлен в очередь'],
+      restart: [`restart?stage=${stage}`, 'Запрошен перезапуск этапа'],
+      approve: [`approve?stage=${stage}`, 'Этап утверждён'],
+      merge: ['merge', 'Merge подтверждён'],
+      resume: ['start', 'Задача продолжена'],
+    };
+    const [path, message] = actions[kind];
     setBusy(true);
-    try { await api(kind === 'resume' ? `/tasks/${task.id}/start` : `/tasks/${task.id}/${kind}${kind === 'merge' ? '' : `?stage=${stage}`}`, { method: 'POST', body: kind === 'merge' ? '{}' : undefined }); notify(kind === 'restart' ? 'Текущая сессия остановлена, запущена новая' : kind === 'approve' ? 'Этап утвержден' : kind === 'resume' ? 'Задача продолжена' : 'Merge подтвержден'); reload(); }
+    try { await api(`/tasks/${task.id}/${path}`, { method: 'POST', body: kind === 'merge' ? '{}' : undefined }); notify(message); await reload(); }
     catch (e) { notify((e as Error).message); } finally { setBusy(false); }
   };
   const submitAnswer = async () => {
@@ -49,7 +58,15 @@ export default function Inspector({ task, stage, requestedArtifact: _requestedAr
     try { await api(`/tasks/${task.id}/answer`, { method: 'POST', body: JSON.stringify({ answer }) }); setAnswer(''); notify('Ответ сохранен, документация перезапущена'); reload(); } catch (e) { notify((e as Error).message); }
   };
   const runs = (task.runs || []).filter(r => r.stage === stage);
+  const nextStage = task.status === 'open' ? 1 : task.current_stage;
+  const pipelineAvailable = canStartPipeline(task);
+  const stageAvailable = pipelineAvailable || task.status === 'waiting_pr';
+  const canRestart = !task.merged_to_main && !['open', 'blocked_main', 'done'].includes(task.status) && stage <= task.current_stage;
+  const stageUnavailableReason = stage > nextStage
+    ? 'Сначала завершите предыдущие этапы'
+    : !task.stage_agents[stage] ? 'Назначьте бота на этап' : undefined;
   return <div className="p-5">
+    {pipelineAvailable && <button disabled={busy || !task.stage_agents[nextStage]} title={task.stage_agents[nextStage] ? undefined : `Назначьте бота на этап ${nextStage}`} className="btn btn-primary mb-3 w-full" onClick={() => action('pipeline')}><Play size={14}/>Запустить пайплайн</button>}
     <div className="mb-5 flex border-b border-slate-800" role="tablist" aria-label="Инспектор задачи">{([['description', 'Описание'], ['stage', 'Этап'], ['document', 'Документ']] as [InspectorTab, string][]).map(([id, title]) => <button key={id} role="tab" aria-selected={tab === id} onClick={() => onTabChange(id)} className={`-mb-px border-b-2 px-3 py-2 text-xs transition ${tab === id ? 'border-indigo-400 text-indigo-300' : 'border-transparent text-slate-500 hover:text-slate-300'}`}>{title}</button>)}</div>
     {task.status === 'needs_human' && <section className="mb-5 rounded-lg border border-amber-700/60 bg-amber-950/30 p-3 text-xs"><div className="flex items-start gap-2 text-amber-200"><Hand size={15} className="mt-0.5 shrink-0"/><div><b>Нужно решение человека</b>{task.hold_reason && <p className="mt-1 text-amber-200/80">{task.hold_reason}</p>}</div></div><button disabled={busy} className="btn btn-primary mt-3 w-full" onClick={() => action('resume')}><Play size={14}/>Продолжить</button></section>}
     {tab === 'description' && <div><TaskDescription task={task}/><section><h3 className="mb-3 text-xs font-medium text-slate-300">Чат Yougile</h3>{chat ? <div className="markdown text-xs leading-5 text-slate-400"><Markdown text={chatContent}/></div> : <p className="text-[11px] text-slate-600">Чат не импортирован</p>}</section></div>}
@@ -64,7 +81,14 @@ export default function Inspector({ task, stage, requestedArtifact: _requestedAr
       {task.status === 'waiting_answer' && stage === 1 && <section className="mb-5"><textarea rows={3} value={answer} onChange={e => setAnswer(e.target.value)} placeholder="Ответ на вопросы бота..."/><button onClick={submitAnswer} className="btn btn-primary mt-2 w-full"><Send size={14}/>Отправить ответ</button></section>}
       <section className="mb-5"><h3 className="mb-2 flex items-center gap-2 text-xs font-medium text-slate-300"><Flame size={14}/>Расход токенов</h3>{runs.length ? <div className="space-y-2">{runs.map(r => <div key={r.id} className="rounded-lg border border-slate-800 bg-slate-900/50 p-3 text-[10px]"><div className="flex justify-between"><span>Попытка {r.attempt} {r.is_fallback && '· Fallback'}</span><span className="text-orange-300">{r.tokens_estimated && '~'}{fmtTokens(spentTokens(r))}</span></div><div className="mt-1 text-slate-600">{r.cli_used} {r.model_used}</div><div className="mt-2 grid grid-cols-3 gap-1 text-slate-500"><span>In: {fmtTokens(r.input_tokens)}</span><span>Out: {fmtTokens(r.output_tokens)}</span><span>Cache: {fmtTokens(r.cache_tokens)}</span></div>{r.error && <div className="mt-2 text-rose-400">{r.error}</div>}</div>)}</div> : <p className="text-[11px] text-slate-600">Запусков еще не было</p>}</section>
       <section className="mb-5"><h3 className="mb-2 flex items-center gap-2 text-xs font-medium text-slate-300"><TerminalSquare size={14}/>Live Logs</h3><pre ref={logRef} className="scrollbar h-40 overflow-auto whitespace-pre-wrap rounded-lg border border-slate-800 bg-[#050912] p-3 font-mono text-[10px] leading-relaxed text-emerald-300/70">{logs || 'Ожидание вывода...'}</pre></section>
-      <section className="flex flex-wrap gap-2 border-t border-slate-800 pt-4">{stage <= 4 && <><button disabled={busy} className="btn flex-1 !px-2 text-[11px]" onClick={() => action('restart')}><RotateCcw size={13}/>Перезапустить</button>{stage !== 3 && <button disabled={busy} className="btn btn-primary flex-1 !px-2 text-[11px]" onClick={() => action('approve')}><Check size={13}/>Апрувнуть</button>}</>}{stage === 5 && <button disabled={busy} className="btn btn-primary w-full" onClick={() => action('merge')}><Check size={14}/>Подтвердить Merge вручную</button>}</section>
+      <section className="flex flex-wrap gap-2 border-t border-slate-800 pt-4">
+        {stage <= 4 && <>
+          {stageAvailable && <button disabled={busy || !!stageUnavailableReason} title={stageUnavailableReason} className="btn btn-primary basis-full" onClick={() => action('stage')}><Play size={14}/>Запустить только этот этап</button>}
+          {canRestart && !stageAvailable && <button disabled={busy} className="btn flex-1 !px-2 text-[11px]" onClick={() => action('restart')}><RotateCcw size={13}/>Перезапустить</button>}
+          {canRestart && stage === task.current_stage && stage !== 3 && <button disabled={busy} className="btn flex-1 !px-2 text-[11px]" onClick={() => action('approve')}><Check size={13}/>Апрувнуть</button>}
+        </>}
+        {stage === 5 && <button disabled={busy || task.status !== 'waiting_pr'} className="btn btn-primary w-full" onClick={() => action('merge')}><Check size={14}/>Подтвердить Merge вручную</button>}
+      </section>
     </>}
   </div>;
 }

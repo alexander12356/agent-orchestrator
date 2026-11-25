@@ -121,7 +121,9 @@ Yougile подключается через REST API v2. На вкладке «�
 - `GET/POST /api/agents`, `PUT/DELETE /api/agents/{id}`, `POST /api/agents/{id}/avatar`.
 - `GET/POST /api/tasks`, `GET/PUT/DELETE /api/tasks/{id}`.
 - `GET /api/tasks/{id}/artifacts[/{name}]`, `GET /api/tasks/{id}/logs` (SSE).
-- `POST /api/tasks/{id}/start`, `/answer`, `/restart?stage=N`, `/approve?stage=N`, `/merge`.
+- `POST /api/tasks/{id}/start?pipeline=true` продолжает пайплайн с первого непройденного этапа. В графе задачи это кнопка «Запустить пайплайн».
+- `POST /api/tasks/{id}/start?stage=N` запускает только выбранный этап (1–4), если предыдущие этапы пройдены. Кнопка «Запустить только этот этап» находится на вкладке «Этап».
+- `POST /api/tasks/{id}/answer`, `/restart?stage=N`, `/approve?stage=N`, `/merge`.
 - `GET/PUT /api/settings`, `POST /api/integrations/yougile/test`, `POST /api/integrations/yougile/import`, `POST /api/integrations/yougile/webhook`, `GET /api/health`.
 
 ## Тесты

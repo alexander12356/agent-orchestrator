@@ -259,10 +259,12 @@ async def answer(task_id: int, data: TrackerAnswer) -> dict[str, bool]:
 
 
 @app.post("/api/tasks/{task_id}/start", status_code=202)
-async def start_open(task_id: int) -> dict[str, bool]:
+async def start_task(task_id: int, stage: int | None = None, pipeline: bool = False) -> dict[str, bool]:
     get_task(task_id)
+    if stage is not None and (stage not in (1, 2, 3, 4) or pipeline):
+        raise HTTPException(400, "Укажите этап от 1 до 4 для одиночного запуска")
     try:
-        await dispatcher.start_open(task_id)
+        await dispatcher.start_task(task_id, stage, pipeline)
     except ValueError as exc:
         raise HTTPException(409, str(exc))
     return {"ok": True}
@@ -273,7 +275,10 @@ async def restart(task_id: int, stage: int) -> dict[str, bool]:
     get_task(task_id)
     if stage not in (1, 2, 3, 4):
         raise HTTPException(400, "Некорректный этап")
-    await dispatcher.restart(task_id, stage)
+    try:
+        await dispatcher.restart(task_id, stage)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
     return {"ok": True}
 
 
@@ -474,6 +479,7 @@ async def worker_socket(websocket: WebSocket, authorization: str | None = Header
     await websocket.accept()
     await hub.connect(websocket)
     try:
+        await dispatcher.schedule()
         while True:
             message = await websocket.receive_json()
             kind = message.get("type")

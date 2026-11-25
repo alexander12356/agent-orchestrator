@@ -40,15 +40,15 @@ def test_dependency_cycle_is_rejected(client, agent):
 
 
 def test_start_open_task(client, agent, monkeypatch):
+    async def start(task_id):
+        pass
+
+    monkeypatch.setattr('app.main.dispatcher.start', start)
     task = make_task(client, agent)
     from app.database import connect
     with connect() as conn:
         conn.execute("UPDATE tasks SET status='open' WHERE id=?", (task['id'],))
 
-    async def start(task_id):
-        pass
-
-    monkeypatch.setattr('app.main.dispatcher.start', start)
     response = client.post(f"/api/tasks/{task['id']}/start")
 
     assert response.status_code == 202
