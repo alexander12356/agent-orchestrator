@@ -33,6 +33,20 @@ npm run dev
 
 Vite доступен на `http://localhost:5173` и проксирует API на порт 8000.
 
+## Управление запуском в WSL2 (Windows)
+
+`scripts/orchestrator.bat` управляет сервером в копии репозитория `/root/projects/agent-orchestrator` внутри Ubuntu WSL2. Процесс стартует через `setsid nohup uvicorn` и переживает закрытие окна:
+
+```bat
+scripts\orchestrator.bat start     :: запуск на порту 8000
+scripts\orchestrator.bat stop      :: остановка (SIGTERM, затем SIGKILL через 20 с)
+scripts\orchestrator.bat restart   :: stop + start
+scripts\orchestrator.bat status    :: процесс, health-check из WSL и из Windows
+scripts\orchestrator.bat log       :: последние 40 строк uvicorn.log
+```
+
+Дистрибутив по умолчанию — `Ubuntu-24.04`, другой задаётся переменной `ORCHESTRATOR_WSL_DISTRO`. Файл должен оставаться с CRLF: `cmd.exe` не находит метки `goto` в батнике с LF. Открывайте `http://127.0.0.1:8000`: если в системе включён прокси без исключения для localhost, адрес `http://localhost:8000` может вернуть 502.
+
 ## Настройка CLI
 
 В профиле бота выберите Claude Code, Codex, Kimi, ZCode, Gemini или Aider. Утилита должна быть установлена и авторизована в среде выполнения. Поле `command` позволяет переопределить команду и подключить любой Custom CLI.
