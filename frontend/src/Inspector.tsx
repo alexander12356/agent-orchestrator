@@ -84,7 +84,7 @@ export default function Inspector({ task, stage, requestedArtifact: _requestedAr
       <section className="flex flex-wrap gap-2 border-t border-slate-800 pt-4">
         {stage <= 4 && <>
           {stageAvailable && <button disabled={busy || !!stageUnavailableReason} title={stageUnavailableReason} className="btn btn-primary basis-full" onClick={() => action('stage')}><Play size={14}/>Запустить только этот этап</button>}
-          {canRestart && !stageAvailable && <button disabled={busy} className="btn flex-1 !px-2 text-[11px]" onClick={() => action('restart')}><RotateCcw size={13}/>Перезапустить</button>}
+          {canRestart && <button disabled={busy} className="btn flex-1 !px-2 text-[11px]" onClick={() => action('restart')}><RotateCcw size={13}/>Перезапустить</button>}
           {canRestart && stage === task.current_stage && stage !== 3 && <button disabled={busy} className="btn flex-1 !px-2 text-[11px]" onClick={() => action('approve')}><Check size={13}/>Апрувнуть</button>}
         </>}
         {stage === 5 && <button disabled={busy || task.status !== 'waiting_pr'} className="btn btn-primary w-full" onClick={() => action('merge')}><Check size={14}/>Подтвердить Merge вручную</button>}

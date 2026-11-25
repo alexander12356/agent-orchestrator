@@ -82,4 +82,15 @@ describe('Inspector', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Запустить пайплайн' }));
     await waitFor(() => expect(api).toHaveBeenCalledWith('/tasks/7/start?pipeline=true', expect.objectContaining({ method: 'POST' })));
   });
+
+  it('can restart a failed stage alongside the separate start actions', async () => {
+    const failed = { ...task, status: 'error', current_stage: 2, stage_agents: { 1: 1, 2: 1 } };
+    render(<Inspector {...props} task={failed} stage={2} tab="stage" />);
+
+    expect(screen.getByRole('button', { name: 'Запустить только этот этап' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Запустить пайплайн' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Перезапустить' }));
+
+    await waitFor(() => expect(api).toHaveBeenCalledWith('/tasks/7/restart?stage=2', expect.objectContaining({ method: 'POST' })));
+  });
 });
