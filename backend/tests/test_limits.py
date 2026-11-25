@@ -86,6 +86,8 @@ def test_revision_prompt_names_previous_document_and_new_output(client, agent, i
     assert prompt.index("«Ситуация»") < prompt.index("«Как код это обрабатывает»")
     assert "обязательно добавь Mermaid" in prompt
     assert "«имя функции — описание»" in prompt
+    assert "«Тест N — короткое название»" in prompt
+    assert "«Условия», «Действие», «Ожидаемый результат»" in prompt
 
 
 def test_code_review_prompt_uses_snapshot_and_approved_document(client, agent, idle):
