@@ -81,6 +81,8 @@ def test_revision_prompt_names_previous_document_and_new_output(client, agent, i
     positions = [prompt.index(f'«{section}»') for section in sections]
     assert positions == sorted(positions)
     assert "Сохрани согласованное поведение" in prompt
+    assert "Номера смежных задач указывай только здесь" in prompt
+    assert "кто вызывает операцию, когда и что получает" in prompt
 
 
 def test_code_review_prompt_uses_snapshot_and_approved_document(client, agent, idle):
