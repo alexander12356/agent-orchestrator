@@ -11,7 +11,7 @@ from .events import bus
 from .repo import RepoError, export_task_files, prepare_checkout, repository_url
 from .runner import ProcessRunner, RunResult
 from .schemas import IntegrationSettings
-from .tracker import integration_settings, publish_questions
+from .tracker import find_reply, integration_settings, publish_questions
 from .worker_hub import hub
 
 
@@ -592,6 +592,26 @@ class Dispatcher:
             conn.execute("UPDATE tasks SET status='error', updated_at=? WHERE id=?", (now(), task_id))
         self.active.pop(task_id, None)
         await bus.publish(task_id, 3, error)
+
+    async def reconcile_yougile_answers(self, issue_id: str | None) -> list[int]:
+        with connect() as conn:
+            waiting = conn.execute(
+                """SELECT tasks.id, tasks.external_issue_id, stage_runs.yougile_question_message_id
+                   FROM tasks JOIN stage_runs ON stage_runs.id = (
+                       SELECT id FROM stage_runs WHERE task_id=tasks.id AND stage=1 ORDER BY attempt DESC LIMIT 1
+                   )
+                   WHERE tasks.status='waiting_answer' AND tasks.external_issue_id IS NOT NULL
+                     AND stage_runs.yougile_question_message_id IS NOT NULL
+                     AND (? IS NULL OR tasks.external_issue_id=?)""",
+                (issue_id, issue_id),
+            ).fetchall()
+        accepted = []
+        for task in waiting:
+            chat_id, question_id = task["external_issue_id"], task["yougile_question_message_id"]
+            reply = await find_reply(chat_id, question_id)
+            if reply and await self.answer(task["id"], reply, yougile_reply=(chat_id, question_id)):
+                accepted.append(task["id"])
+        return accepted
 
     async def answer(self, task_id: int, answer: str, *, yougile_reply: tuple[str, int] | None = None) -> bool:
         with transaction() as conn:

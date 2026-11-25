@@ -129,8 +129,8 @@ def test_yougile_webhook_security_and_bot_filter(client):
     assert result.json()['accepted'] is False
 
 
-@pytest.mark.parametrize('reply_in_webhook', [True, False])
-def test_yougile_webhook_accepts_only_reply_to_current_question(client, agent, monkeypatch, reply_in_webhook):
+@pytest.mark.parametrize('delivery', ['reply', 'message_id', 'signal'])
+def test_yougile_webhook_accepts_only_reply_to_current_question(client, agent, monkeypatch, delivery):
     save_settings(client)
     task = make_task(client, agent)
     with connect() as conn:
@@ -158,13 +158,20 @@ def test_yougile_webhook_accepts_only_reply_to_current_question(client, agent, m
         assert result.json() == {'accepted': False}
         assert client.get(f"/api/tasks/{task['id']}").json()['status'] == 'waiting_answer'
 
-    if reply_in_webhook:
+    if delivery == 'reply':
         data['properties'] = {'replyTo': 200}
-    else:
+    elif delivery == 'message_id':
         data['id'] = 201
         FakeClient.requests = []
         FakeClient.responses = [response(payload={'id': 201, 'properties': {'replyTo': 200}})]
-        monkeypatch.setattr('app.tracker.httpx.AsyncClient', FakeClient)
+    else:
+        data = {}
+        FakeClient.requests = []
+        FakeClient.responses = [response(payload={'content': [
+            {'id': 204, 'text': 'Later reply', 'properties': {'replyTo': 200}},
+            {'id': 202, 'text': 'Use fixed timestep', 'properties': {'replyTo': 200}},
+            {'id': 201, 'text': 'Reply to an older question', 'properties': {'replyTo': 100}},
+        ]})]
 
     result = client.post(url, json={'event': 'chat_message-created', 'data': data})
 
@@ -172,8 +179,11 @@ def test_yougile_webhook_accepts_only_reply_to_current_question(client, agent, m
     assert result.json() == {'accepted': True, 'task_id': task['id']}
     assert client.get(f"/api/tasks/{task['id']}").json()['status'] == 'queued'
     assert 'fixed timestep' in (settings.storage_dir / 'tasks' / str(task['id']) / '01_answers_v2.md').read_text()
-    if not reply_in_webhook:
+    if delivery == 'message_id':
         assert FakeClient.requests[0][1] == 'https://yougile.com/api-v2/chats/task-uuid/messages/201'
+    elif delivery == 'signal':
+        assert FakeClient.requests[0][1] == 'https://yougile.com/api-v2/chats/task-uuid/messages'
+        assert FakeClient.requests[0][2]['params']['since'] == 200
     assert client.post(url, json={'event': 'chat_message-created', 'data': data}).json() == {'accepted': False}
 
 

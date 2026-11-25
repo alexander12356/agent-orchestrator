@@ -454,11 +454,21 @@ async def tracker_webhook(request: Request) -> dict[str, Any]:
     payload = await request.json()
     if payload.get("event") != "chat_message-created":
         return {"accepted": False}
-    data = payload.get("data", {})
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        data = {}
     issue = str(data.get("chatId") or data.get("taskId") or "")
     answer = data.get("text")
     if not issue or not answer:
-        raise HTTPException(400, "В webhook Yougile нужны data.chatId и data.text")
+        try:
+            task_ids = await dispatcher.reconcile_yougile_answers(issue or None)
+        except YougileError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        if len(task_ids) == 1:
+            return {"accepted": True, "task_id": task_ids[0]}
+        if task_ids:
+            return {"accepted": True, "task_ids": task_ids}
+        return {"accepted": False}
     if str(answer).startswith(BOT_PREFIX):
         return {"accepted": False}
     with connect() as conn:

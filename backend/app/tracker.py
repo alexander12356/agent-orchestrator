@@ -122,6 +122,26 @@ async def get_all(client: httpx.AsyncClient, path: str, config: dict[str, str], 
         offset += len(content)
 
 
+async def find_reply(issue_id: str, question_id: int) -> str | None:
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            messages = await get_all(client, f"/chats/{issue_id}/messages", integration_settings(), {"since": question_id})
+    except (httpx.HTTPError, ValueError) as exc:
+        raise YougileError("Не удалось прочитать ответы в YouGile") from exc
+    for message in sorted(messages, key=lambda item: item["id"]):
+        text = message.get("text")
+        if (
+            message["id"] > question_id
+            and not message.get("deleted")
+            and (message.get("properties") or {}).get("replyTo") == question_id
+            and isinstance(text, str)
+            and text.strip()
+            and not text.startswith(BOT_PREFIX)
+        ):
+            return text
+    return None
+
+
 def named_item(items: list[dict[str, Any]], title: str, kind: str) -> dict[str, Any]:
     for item in items:
         if item.get("title", "").casefold() == title.casefold():
