@@ -3,7 +3,7 @@ import { Background, Controls, Edge, Handle, MarkerType, Node, NodeProps, Positi
 import { CheckCircle2, Flame, GitPullRequest, UserRound } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { fmtTokens, spentTokens } from './api';
-import { Avatar, Empty } from './components';
+import { Avatar, QuestionIcon } from './components';
 import ArtifactEdge from './ArtifactEdge';
 import Inspector, { InspectorTab } from './Inspector';
 import RevisionWindow from './RevisionWindow';
@@ -14,15 +14,16 @@ const envs = ['VDS', 'VDS', 'Local Unity Worker', 'VDS', 'GitHub'];
 
 function StageNode({ data, selected }: NodeProps) {
   const d = data as unknown as { title: string; env: string; agent?: Agent; model?: string; active: boolean; held: boolean; status: string; tokens: number; done: boolean; fallback: boolean; human: boolean };
+  const waitingForAnswer = d.status === 'waiting_answer';
   return <div className={`card w-52 p-4 transition ${selected ? '!border-indigo-300 !bg-indigo-500/10 shadow-lg shadow-indigo-950 ring-2 ring-indigo-400/40' : d.active || d.held ? '!border-amber-400/70' : d.done ? '!border-emerald-700/70' : ''}`}>
     <Handle id="forward-target" type="target" position={Position.Top} className="!bg-slate-500"/>
     <Handle id="forward-source" type="source" position={Position.Right} className="!bg-slate-500"/>
     <Handle id="return-target" type="target" position={Position.Bottom} className="!bg-slate-500"/>
     <Handle id="return-source" type="source" position={Position.Left} className="!bg-slate-500"/>
-    <div className="mb-3 flex items-start justify-between"><span className="text-xs font-semibold text-slate-200">{d.title}</span>{d.active ? <span className="h-2 w-2 animate-pulse rounded-full bg-amber-400"/> : d.done ? <CheckCircle2 size={15} className="text-emerald-500"/> : <span className="h-2 w-2 rounded-full bg-slate-700"/>}</div>
+    <div className="mb-3 flex items-start justify-between"><span className="text-xs font-semibold text-slate-200">{d.title}</span>{waitingForAnswer ? <QuestionIcon/> : d.active ? <span className="h-2 w-2 animate-pulse rounded-full bg-amber-400"/> : d.done ? <CheckCircle2 size={15} className="text-emerald-500"/> : <span className="h-2 w-2 rounded-full bg-slate-700"/>}</div>
     <div className="flex items-center gap-2">{d.human ? <UserRound size={26} className="text-purple-400"/> : <Avatar agent={d.agent}/>}<div className="min-w-0"><div className="truncate text-[11px] text-slate-400">{d.human ? 'Ожидание merge' : d.agent?.name || 'Не назначен'}</div><div className="mt-0.5 text-[9px] uppercase tracking-wide text-slate-600">{d.env}</div></div></div>
     {d.model && <div className="mt-2 truncate text-[10px] text-indigo-300" title={`Модель: ${d.model}`}>Модель: {d.model}</div>}
-    <div className="mt-3 flex items-center justify-between border-t border-slate-800 pt-2 text-[10px]"><span className={d.active || d.held || d.status === 'paused' ? 'text-amber-300' : d.status === 'error' ? 'text-rose-400' : 'text-slate-500'}>{d.status === 'paused' ? 'На паузе' : d.held ? 'Нужен человек' : d.fallback ? 'Fallback' : d.active ? 'В работе' : d.done ? 'Пройден' : d.status === 'waiting_answer' ? 'Ждёт ответа' : d.status === 'error' ? 'Ошибка' : 'Ожидает'}</span><span className="flex items-center gap-1 text-orange-300/70"><Flame size={11}/>{fmtTokens(d.tokens)}</span></div>
+    <div className="mt-3 flex items-center justify-between border-t border-slate-800 pt-2 text-[10px]"><span className={d.active || d.held || d.status === 'paused' ? 'text-amber-300' : d.status === 'error' ? 'text-rose-400' : 'text-slate-500'}>{waitingForAnswer ? 'Ждёт ответа' : d.status === 'paused' ? 'На паузе' : d.held ? 'Нужен человек' : d.fallback ? 'Fallback' : d.active ? 'В работе' : d.done ? 'Пройден' : d.status === 'error' ? 'Ошибка' : 'Ожидает'}</span><span className="flex items-center gap-1 text-orange-300/70"><Flame size={11}/>{fmtTokens(d.tokens)}</span></div>
   </div>;
 }
 
