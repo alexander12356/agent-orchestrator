@@ -2,6 +2,7 @@
 import argparse
 import asyncio
 import base64
+import hashlib
 import json
 import os
 import re
@@ -9,10 +10,12 @@ import shlex
 import shutil
 import signal
 import sys
+import tempfile
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 import websockets
 
@@ -540,18 +543,66 @@ class UnityWorker:
 
     async def upsert_pr(self, path: Path, branch: str, title: str, body: str) -> str:
         pr_url = (await self.checked(["gh", "pr", "list", "--head", branch, "--json", "url", "--jq", ".[0].url"], path)).strip()
-        if pr_url:
-            await self.checked(["gh", "pr", "edit", pr_url, "--title", title, "--body", body], path)
-            return pr_url
-        return (await self.checked(["gh", "pr", "create", "--draft", "--title", title, "--body", body], path)).strip()
+        with tempfile.TemporaryDirectory() as temp:
+            body_file = Path(temp) / "body.txt"
+            if pr_url:
+                url = urlsplit(pr_url)
+                owner, repo, _, number = url.path.strip("/").split("/")
+                body_file.write_text(json.dumps({"title": title, "body": body}), encoding="utf-8")
+                await self.checked([
+                    "gh", "api", "--hostname", url.netloc, "--method", "PATCH",
+                    f"repos/{owner}/{repo}/pulls/{number}", "--input", str(body_file), "--silent",
+                ], path)
+                return pr_url
+            body_file.write_text(body, encoding="utf-8")
+            return (await self.checked([
+                "gh", "pr", "create", "--draft", "--title", title, "--body-file", str(body_file),
+            ], path)).strip()
+
+    async def publish(self, message: dict[str, Any], path: Path, publication: dict[str, Any]) -> None:
+        branch = message["branch_name"]
+        branch_head = (await self.checked(["git", "rev-parse", f"refs/heads/{branch}"], path)).strip()
+        if branch_head != publication["head"]:
+            raise RuntimeError("Ветка задачи изменилась после проверки Unity.")
+        await self.checked(["git", "push", "-u", "origin", branch], path)
+        for attempt in range(3):
+            try:
+                pr_url = await self.upsert_pr(path, branch, publication["title"], publication["body"])
+                break
+            except RuntimeError as exc:
+                if attempt == 2 or not re.search(r"HTTP (?:429|50[0234])\b|connection reset|i/o timeout", str(exc), re.I):
+                    raise
+                await self.log(message["task_id"], "Временный сбой GitHub. Повторяю публикацию PR.\n")
+                await asyncio.sleep(2 ** (attempt + 1))
+        await self.send({
+            "type": "TASK_COMPLETED", "task_id": message["task_id"], "run_id": message["run_id"],
+            "report": f'# Отчет реализации\n\nPR: {pr_url}\n\n{publication["body"]}',
+            "pr_url": pr_url, "worktree_path": str(path), **publication["usage"],
+        })
+        await self.send({"type": "TASK_META", "task_id": message["task_id"],
+                         "tokens_estimated": publication["usage"].get("estimated", False)})
 
     async def assign(self, message: dict[str, Any]) -> None:
         task_id, run_id = int(message["task_id"]), int(message["run_id"])
         config = message["agent_config"]
         triggers = config.get("triggers", {})
-        path: Path | None = None
+        branch = message["branch_name"]
+        checkpoint = self.worktrees / f".task-{task_id}-publication.json"
+        inputs = {key: value for key, value in message.items() if key != "run_id"}
+        fingerprint = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode("utf-8")).hexdigest()
         try:
-            path = await self.prepare_worktree(task_id, message["branch_name"])
+            path = await self.prepare_worktree(task_id, branch)
+            if checkpoint.is_file():
+                publication = json.loads(checkpoint.read_text(encoding="utf-8"))
+                if publication["fingerprint"] == fingerprint:
+                    head = (await self.checked(["git", "rev-parse", "HEAD"], path)).strip()
+                    dirty = await self.checked(["git", "status", "--porcelain"], path)
+                    if publication["head"] == head and not dirty.strip():
+                        await self.log(task_id, "Возобновляю публикацию проверенного коммита.\n")
+                        await self.publish(message, path, publication)
+                        checkpoint.unlink()
+                        return
+                checkpoint.unlink()
             docs = path / "orchestrator-tech-doc.md"
             details_path = path / PR_DETAILS_FILE
             tech_doc = message.get("tech_doc_content", "")
@@ -590,20 +641,27 @@ class UnityWorker:
             details = read_pr_details(details_path)
             docs.unlink(missing_ok=True)
             details_path.unlink(missing_ok=True)
-            code, _ = await self.execute(["git", "diff", "--quiet"], path)
-            if code:
+            if (await self.checked(["git", "status", "--porcelain"], path)).strip():
                 await self.checked(["git", "add", "-A"], path)
                 await self.checked(["git", "commit", "-m", f"feat: implement task {task_id}"], path)
-            await self.checked(["git", "push", "-u", "origin", message["branch_name"]], path)
             stat = await self.checked(["git", "diff", "--stat", "origin/main...HEAD"], path)
             pr_body = format_pr_body(
                 details, task_id, unity_status, stat,
                 str(message.get("external_issue_key") or ""), str(message.get("external_issue_url") or ""),
             )
-            pr_url = await self.upsert_pr(path, message["branch_name"], title, pr_body)
-            report = f"# Отчет реализации\n\nPR: {pr_url}\n\n{pr_body}"
-            await self.send({"type": "TASK_COMPLETED", "task_id": task_id, "run_id": run_id, "report": report, "pr_url": pr_url, "worktree_path": str(path), "cli_used": selected.get("cli"), "model_used": selected.get("model", ""), "is_fallback": selected != config["primary"], **{k: v for k, v in result.items() if k in ("input_tokens", "output_tokens", "cache_tokens", "estimated", "usage_partial")}})
-            await self.send({"type": "TASK_META", "task_id": task_id, "tokens_estimated": result.get("estimated", False)})
+            usage = {key: result[key] for key in (*FIELDS, "estimated", "usage_partial") if key in result}
+            usage.update(cli_used=selected.get("cli"), model_used=selected.get("model", ""),
+                         is_fallback=selected != config["primary"])
+            publication = {
+                "fingerprint": fingerprint,
+                "head": (await self.checked(["git", "rev-parse", "HEAD"], path)).strip(),
+                "title": title, "body": pr_body, "usage": usage,
+            }
+            temp_checkpoint = checkpoint.with_suffix(".tmp")
+            temp_checkpoint.write_text(json.dumps(publication), encoding="utf-8")
+            temp_checkpoint.replace(checkpoint)
+            await self.publish(message, path, publication)
+            checkpoint.unlink()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -622,6 +680,7 @@ class UnityWorker:
             raise ValueError("Worktree находится вне разрешенной директории")
         if path.exists():
             await self.checked(["git", "worktree", "remove", "--force", str(path)], self.repo)
+        (self.worktrees / f'.task-{int(message["task_id"])}-publication.json').unlink(missing_ok=True)
         await self.execute(["git", "branch", "-D", message["branch_name"]], self.repo)
         await self.execute(["git", "push", "origin", "--delete", message["branch_name"]], self.repo)
 

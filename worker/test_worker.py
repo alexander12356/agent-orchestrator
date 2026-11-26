@@ -384,11 +384,12 @@ def test_pr_details_require_specific_content_and_omit_empty_review_focus(tmp_pat
     assert 'Нет изменений относительно origin/main.' in body
 
 
-@pytest.mark.parametrize("repair", [False, True])
-def test_assign_creates_pr_from_summary_and_keeps_service_files_out_of_commit(tmp_path, repair):
+@pytest.mark.parametrize("repair,resume", [(False, False), (True, False), (False, True)])
+def test_assign_creates_pr_from_summary_and_keeps_service_files_out_of_commit(tmp_path, repair, resume):
     worker = make_worker(tmp_path)
     path = tmp_path / 'task-worktree'
     path.mkdir()
+    worker.worktrees.mkdir()
     commands = []
     prompts = []
     sent = []
@@ -409,13 +410,16 @@ def test_assign_creates_pr_from_summary_and_keeps_service_files_out_of_commit(tm
             raise module.UnityCompilationError("Test.cs(3,2): error CS0161")
         return 'Unity batchmode завершился успешно.'
 
-    async def execute(command, cwd=None):
-        commands.append(command)
-        assert command == ['git', 'diff', '--quiet']
-        return 1, ''
+    create_attempts = 0
+    body = ""
 
     async def checked(command, cwd=None):
+        nonlocal create_attempts, body
         commands.append(command)
+        if command[:2] == ['git', 'rev-parse']:
+            return 'validated-head'
+        if command == ['git', 'status', '--porcelain']:
+            return '' if create_attempts else ' M SaveSystem.cs'
         if command == ['git', 'add', '-A']:
             assert not (path / 'orchestrator-tech-doc.md').exists()
             assert not (path / module.PR_DETAILS_FILE).exists()
@@ -424,7 +428,11 @@ def test_assign_creates_pr_from_summary_and_keeps_service_files_out_of_commit(tm
         if command[:3] == ['gh', 'pr', 'list']:
             return ''
         if command[:3] == ['gh', 'pr', 'create']:
-            return 'https://github.example/pull/42\n'
+            create_attempts += 1
+            if resume and create_attempts == 1:
+                raise RuntimeError('remote unavailable')
+            body = Path(command[-1]).read_text(encoding='utf-8')
+            return 'https://github.example/org/repo/pull/42\n'
         return ''
 
     async def send(message):
@@ -433,10 +441,9 @@ def test_assign_creates_pr_from_summary_and_keeps_service_files_out_of_commit(tm
     worker.prepare_worktree = prepare_worktree
     worker.run_with_fallback = run_with_fallback
     worker.run_unity = run_unity
-    worker.execute = execute
     worker.checked = checked
     worker.send = send
-    asyncio.run(worker.assign({
+    message = {
         'task_id': 42,
         'run_id': 7,
         'branch_name': 'Agent-Orchestrator/ZEL-42',
@@ -447,18 +454,23 @@ def test_assign_creates_pr_from_summary_and_keeps_service_files_out_of_commit(tm
         'tech_doc_content': '# Технический документ',
         'review_comments_content': '',
         'agent_config': {'primary': KIMI, 'fallback': [], 'triggers': {}, 'role_prompt': 'Unity developer'},
-    }))
+    }
+    asyncio.run(worker.assign(message))
+    if resume:
+        assert sent[-1]['type'] == 'TASK_FAILED'
+        asyncio.run(worker.assign({**message, 'run_id': 8}))
+        assert len(prompts) == 1
+        assert not list(worker.worktrees.glob('*.json'))
 
     create = next(command for command in commands if command[:3] == ['gh', 'pr', 'create'])
     assert create[create.index('--title') + 1] == 'Сохранение прогресса'
-    body = create[create.index('--body') + 1]
     assert '## Что сделано' in body
     assert 'SaveSystem сериализует состояние перед выходом.' in body
     assert 'raw CLI output' not in body
     assert 'Прогресс должен переживать перезапуск.' in prompts[0]
     assert module.PR_DETAILS_CONTRACT in prompts[0]
     completed = next(message for message in sent if message['type'] == 'TASK_COMPLETED')
-    assert completed['pr_url'] == 'https://github.example/pull/42'
+    assert completed['pr_url'] == 'https://github.example/org/repo/pull/42'
     assert body in completed['report']
     assert completed['pr_url'] in completed['report']
     assert 'raw CLI output' not in completed['report']
@@ -471,16 +483,19 @@ def test_existing_pr_is_updated_instead_of_reused_unchanged(tmp_path):
     async def checked(command, cwd=None):
         commands.append(command)
         if command[:3] == ['gh', 'pr', 'list']:
-            return 'https://github.example/pull/42\n'
+            return 'https://github.example/org/repo/pull/42\n'
+        assert command[:3] == ['gh', 'api', '--hostname']
+        assert 'repos/org/repo/pulls/42' in command
+        assert json.loads(Path(command[command.index('--input') + 1]).read_text()) == {
+            'title': 'Title', 'body': 'Updated body',
+        }
         return ''
 
     worker.checked = checked
     url = asyncio.run(worker.upsert_pr(tmp_path, 'Agent-Orchestrator/ZEL-42', 'Title', 'Updated body'))
-    assert url == 'https://github.example/pull/42'
-    assert [command[:3] for command in commands] == [['gh', 'pr', 'list'], ['gh', 'pr', 'edit']]
-    edit = commands[1]
-    assert edit[3] == url
-    assert edit[edit.index('--body') + 1] == 'Updated body'
+    assert url == 'https://github.example/org/repo/pull/42'
+    assert len(commands) == 2
+
 
 @pytest.mark.parametrize("first_output,close_code,expected", [
     ("another Unity instance is running with this project open", 0, ["unity", "close", "unity"]),
