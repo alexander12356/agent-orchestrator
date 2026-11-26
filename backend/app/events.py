@@ -25,7 +25,7 @@ class EventBus:
         created = datetime.now(UTC).isoformat()
         with connect() as conn:
             conn.execute(
-                "INSERT INTO events(task_id, stage, message, created_at) VALUES (?, ?, ?, ?)",
+                "INSERT INTO events(task_id, stage, message, created_at, is_activity) VALUES (?, ?, ?, ?, 1)",
                 (task_id, stage, message, created),
             )
         event = json.dumps({"task_id": task_id, "stage": stage, "message": message, "created_at": created})

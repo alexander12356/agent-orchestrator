@@ -87,7 +87,8 @@ CREATE TABLE IF NOT EXISTS events (
     task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
     stage INTEGER NOT NULL,
     message TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    is_activity INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_stage_runs_task ON stage_runs(task_id, stage);
 CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id, id);
@@ -140,6 +141,9 @@ def init_db() -> None:
             conn.execute("ALTER TABLE stage_runs ADD COLUMN yougile_question_message_id INTEGER")
         if "reviewed_document" not in run_columns:
             conn.execute("ALTER TABLE stage_runs ADD COLUMN reviewed_document TEXT")
+        event_columns = {row["name"] for row in conn.execute("PRAGMA table_info(events)")}
+        if "is_activity" not in event_columns:
+            conn.execute("ALTER TABLE events ADD COLUMN is_activity INTEGER NOT NULL DEFAULT 0")
         # A task that already reached the worker may have its old branch pushed to origin.
         legacy = conn.execute(
             "SELECT id, external_issue_key FROM tasks WHERE branch_name='feat/task-' || id AND NOT EXISTS (SELECT 1 FROM stage_runs WHERE task_id=tasks.id AND stage=3)"

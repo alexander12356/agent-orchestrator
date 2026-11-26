@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from app.runner import ProcessRunner, build_command, cli_environment, estimate_usage, extract_usage, present_log_line, rate_limited_line
+from app.runner import ProcessRunner, build_command, cli_environment, estimate_usage, extract_usage, rate_limited_line
 
 
 def test_codex_runs_outside_the_task_directory():
@@ -101,16 +101,37 @@ def test_explicit_repo_placeholder_is_not_duplicated():
     assert '/mirrors/zelya' in command
 
 
-def test_live_log_keeps_agent_text_and_tool_names():
-    started = present_log_line('{"type":"tool_call","subtype":"started","tool_call":{"readToolCall":{"args":{"path":"AGENTS.md"}}}}')
-    assert started.text == "[read]\n"
-    delta = present_log_line('{"type":"assistant","message":{"content":[{"type":"text","text":"Пишу документ"}]}}')
-    assert delta.text == "Пишу документ"
-    hidden = present_log_line('{"type":"result","subtype":"success"}')
-    assert hidden.text == ""
-    thinking = present_log_line('{"type":"thinking","text":"plan"}')
-    assert thinking.text == "Агент думает…\n"
-    assert present_log_line('{"type":"thinking","text":"more"}', thinking.thinking).text == ""
+def test_live_log_publishes_agent_updates_before_the_cli_exits(monkeypatch, tmp_path):
+    script = tmp_path / "cli.py"
+    script.write_text(
+        "import re, sys, time\n"
+        "from pathlib import Path\n"
+        "progress = Path(re.search(r'`([^\x60]+/updates.txt)`', sys.argv[1]).group(1))\n"
+        "print('{\"type\":\"thinking\",\"text\":\"internal text\"}', flush=True)\n"
+        "with progress.open('a', encoding='utf-8') as file:\n"
+        "    file.write('Проверяю контракт.\\n')\n"
+        "for _ in range(50):\n"
+        "    if Path('published').exists():\n"
+        "        break\n"
+        "    time.sleep(0.1)\n"
+        "else:\n"
+        "    sys.exit(1)\n"
+        "with progress.open('a', encoding='utf-8') as file:\n"
+        "    file.write('Контракт соблюдён.')\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("app.runner.build_command", lambda config, prompt, *args: [sys.executable, str(script), prompt])
+    logged = []
+
+    async def log(text: str) -> None:
+        logged.append(text)
+        (tmp_path / "published").touch()
+
+    result = asyncio.run(ProcessRunner(log_callback=log).run({"cli": "custom"}, "prompt", tmp_path, {}, 1))
+    assert result.exit_code == 0
+    assert logged == ["Проверяю контракт.\n", "Контракт соблюдён.\n"]
+    assert "internal text" in result.output
+    assert not list(tmp_path.glob(".orchestrator-progress-*"))
 
 
 def test_extract_cursor_usage_names():
@@ -151,8 +172,7 @@ def test_long_stream_lines_are_read_instead_of_failing(monkeypatch, tmp_path):
     assert result.exit_code == 0
     assert result.output.startswith('x' * 200_000 + '\n')
     assert result.output.endswith('tail')
-    assert logged[0] == 'x' * 200_000 + '\n'
-    assert logged[-1] == 'tail\n'
+    assert logged == []
 
 
 def test_usage_fallback_is_marked_estimated():

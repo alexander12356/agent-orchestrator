@@ -251,25 +251,35 @@ def test_limit_is_reported_only_by_error_lines():
     assert not module.rate_limited_line('{"type":"assistant","message":{"content":[{"type":"text","text":"rate limit"}]}}')
 
 
-def run_cli(tmp_path, body):
+def run_cli(tmp_path, body, messages=None):
     worker = make_worker(tmp_path)
     script = tmp_path / 'cli.py'
     script.write_text('import sys, time\n' + body, encoding='utf-8')
-    logs = []
+    async def send(message):
+        if messages is not None:
+            messages.append(message)
 
-    async def log(task_id, text):
-        logs.append(text)
-
-    worker.log = log
+    worker.send = send
     config = {'cli': 'custom', 'command': f'"{sys.executable}" "{script}"'}
     return asyncio.run(worker.run_agent(1, tmp_path, config, 'implement', 1))
 
 
 def test_run_agent_reads_long_lines_and_ignores_limit_words_in_prose(tmp_path):
-    result = run_cli(tmp_path, "sys.stdout.write('x' * 200_000 + '\\n')\nsys.stdout.write('HTTP 429 means the rate limit is exceeded.\\n')\n")
+    messages = []
+    result = run_cli(
+        tmp_path,
+        "from pathlib import Path\n"
+        "next(Path.cwd().glob('.orchestrator-progress-*/updates.txt')).write_text('Проверки прошли.\\n', encoding='utf-8')\n"
+        "sys.stdout.write('x' * 200_000 + '\\n')\n"
+        "sys.stdout.write('HTTP 429 means the rate limit is exceeded.\\n')\n",
+        messages,
+    )
     assert result['exit_code'] == 0
     assert result['rate_limited'] is False
     assert result['output'] == 'x' * 200_000 + '\nHTTP 429 means the rate limit is exceeded.\n'
+    assert messages == [
+        {'type': 'LOG_CHUNK', 'task_id': 1, 'chunk': 'Проверки прошли.\n', 'format': 'activity'},
+    ]
 
 
 def test_run_agent_reports_a_limit_of_a_failed_cli(tmp_path):

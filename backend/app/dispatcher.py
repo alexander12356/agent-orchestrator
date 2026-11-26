@@ -302,6 +302,7 @@ class Dispatcher:
 
     async def _fail(self, task_id: int, stage: int, run_id: int, exc: Exception) -> None:
         message = str(exc)
+        summary = message.partition("\n")[0] or type(exc).__name__
         current_limits = limits()
         retried = 0
         with transaction() as conn:
@@ -329,9 +330,9 @@ class Dispatcher:
             else:
                 conn.execute("UPDATE tasks SET status='error', updated_at=? WHERE id=?", (now(), task_id))
         if retried:
-            await bus.publish(task_id, stage, f"Этап {stage} не завершён: {message}\nАвтоповтор {retried} из {current_limits['max_auto_retries']}.\n")
+            await bus.publish(task_id, stage, f"Этап {stage} не завершён: {summary}\nАвтоповтор {retried} из {current_limits['max_auto_retries']}.\n")
         else:
-            await bus.publish(task_id, stage, f"Ошибка: {message}\n")
+            await bus.publish(task_id, stage, f"Ошибка: {summary}\n")
 
     def _prompt(self, task: dict[str, Any], agent: dict[str, Any], stage: int, attempt: int, *,
                 checkout: tuple[Path, str, str] | None = None, previous_error: str = "",
@@ -735,7 +736,8 @@ class Dispatcher:
             conn.execute("UPDATE stage_runs SET status='error', error=?, finished_at=? WHERE id=?", (error, now(), run_id))
             conn.execute("UPDATE tasks SET status='error', updated_at=? WHERE id=?", (now(), task_id))
         self.active.pop(task_id, None)
-        await bus.publish(task_id, 3, error)
+        summary = error.partition("\n")[0] or "Worker failed"
+        await bus.publish(task_id, 3, f"Ошибка: {summary}\n")
 
     async def reconcile_yougile_answers(self, issue_id: str | None) -> list[int]:
         with connect() as conn:

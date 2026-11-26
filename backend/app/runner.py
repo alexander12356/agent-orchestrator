@@ -6,9 +6,11 @@ import re
 import shlex
 import shutil
 import signal
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+
+from .progress import progress_prompt
 
 RATE_LIMIT_RE = re.compile(r"rate.?limit|usage.?limit|quota exceeded|\b429\b|try again later", re.I)
 # A plain text line has to read like a CLI error report before it is checked for a limit.
@@ -60,6 +62,12 @@ class ProcessRunner:
         env: dict[str, str],
         timeout_minutes: int,
     ) -> RunResult:
+        async with progress_prompt(prompt, cwd, self.log_callback) as prompt:
+            return await self._run_cli(config, prompt, cwd, env, timeout_minutes)
+
+    async def _run_cli(
+        self, config: dict[str, Any], prompt: str, cwd: Path, env: dict[str, str], timeout_minutes: int,
+    ) -> RunResult:
         command = build_command(config, prompt, cwd, int(env.get("ORCHESTRATOR_STAGE", "0")), Path(env["ORCHESTRATOR_REPO"]) if env.get("ORCHESTRATOR_REPO") else None)
         try:
             process = await asyncio.create_subprocess_exec(
@@ -77,16 +85,10 @@ class ProcessRunner:
             self.on_process(process)
         lines: list[str] = []
         limited = False
-        thinking = False
-
         async def handle_line(line: bytes) -> bool:
-            nonlocal limited, thinking
+            nonlocal limited
             text = line.decode("utf-8", errors="replace")
             lines.append(text)
-            visible = present_log_line(text, thinking)
-            thinking = visible.thinking
-            if self.log_callback and visible.text:
-                await self.log_callback(visible.text)
             if not limited and rate_limited_line(text):
                 limited = True
                 if self.rate_limit_callback:
@@ -318,65 +320,6 @@ def _with_live_output(args: list[str]) -> list[str]:
     if "--stream-partial-output" not in rewritten:
         rewritten.insert(1, "--stream-partial-output")
     return rewritten
-
-
-@dataclass
-class LogLine:
-    text: str = ""
-    thinking: bool = False
-
-
-def present_log_line(text: str, thinking: bool = False) -> LogLine:
-    raw = text.strip()
-    if not raw.startswith("{"):
-        return LogLine(text if text.endswith("\n") or not text else f"{text}\n", thinking)
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return LogLine(text if text.endswith("\n") else f"{text}\n", thinking)
-    if not isinstance(data, dict):
-        return LogLine("", thinking)
-    kind = str(data.get("type") or "")
-    if kind in {"system", "user", "result"}:
-        return LogLine("", thinking)
-    if kind in {"thinking", "reasoning"}:
-        return LogLine("" if thinking else "Агент думает…\n", True)
-    if kind == "tool_call":
-        if data.get("subtype") == "completed":
-            return LogLine("", thinking)
-        return LogLine(f"[{_tool_name(data)}]\n", thinking)
-    if kind == "assistant":
-        message = data.get("message", {})
-        content = message.get("content") if isinstance(message, dict) else data.get("content")
-        chunks: list[str] = []
-        reasoning = False
-        if isinstance(content, str):
-            chunks.append(content)
-        elif isinstance(content, list):
-            for part in content:
-                if not isinstance(part, dict):
-                    continue
-                if part.get("type") in {"thinking", "reasoning"}:
-                    reasoning = True
-                    continue
-                if part.get("type") == "text" and part.get("text"):
-                    chunks.append(str(part["text"]))
-        if chunks:
-            return LogLine("".join(chunks), thinking)
-        if reasoning:
-            return LogLine("" if thinking else "Агент думает…\n", True)
-    return LogLine("", thinking)
-
-
-def _tool_name(data: dict[str, Any]) -> str:
-    call = data.get("tool_call") or data.get("toolCall") or {}
-    if isinstance(call, dict):
-        if call.get("name"):
-            return str(call["name"])
-        for key in call:
-            if key.lower().endswith("toolcall"):
-                return re.sub(r"ToolCall$", "", key)
-    return str(data.get("name") or "tool")
 
 
 def extract_usage(output: str) -> dict[str, int | bool]:

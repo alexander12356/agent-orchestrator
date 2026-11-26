@@ -7,11 +7,16 @@ import re
 import shlex
 import shutil
 import signal
+import sys
 from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
 import websockets
+
+# The worker can be started directly as a script from any working directory.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from backend.app.progress import progress_prompt
 
 RATE_LIMIT_RE = re.compile(r"rate.?limit|usage.?limit|quota exceeded|\b429\b|try again later", re.I)
 # A plain text line has to read like a CLI error report before it is checked for a limit.
@@ -197,7 +202,7 @@ class UnityWorker:
 
     async def log(self, task_id: int, text: str) -> None:
         print(text, end="", flush=True)
-        await self.send({"type": "LOG_CHUNK", "task_id": task_id, "chunk": text})
+        await self.send({"type": "LOG_CHUNK", "task_id": task_id, "chunk": text, "format": "activity"})
 
     async def execute(self, command: list[str], cwd: Path | None = None) -> tuple[int, str]:
         process = await asyncio.create_subprocess_exec(*command, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
@@ -323,6 +328,13 @@ class UnityWorker:
                 await consumer
 
     async def run_agent(self, task_id: int, path: Path, config: dict[str, Any], prompt: str, timeout: int) -> dict[str, Any]:
+        async def publish(text: str) -> None:
+            await self.log(task_id, text)
+
+        async with progress_prompt(prompt, path, publish) as prompt:
+            return await self._run_cli(task_id, path, config, prompt, timeout)
+
+    async def _run_cli(self, task_id: int, path: Path, config: dict[str, Any], prompt: str, timeout: int) -> dict[str, Any]:
         command = self.command(config, prompt, path)
         env = os.environ.copy()
         if config.get("cli") == "kimi":
@@ -340,7 +352,6 @@ class UnityWorker:
             nonlocal limited
             text = raw.decode("utf-8", errors="replace")
             lines.append(text)
-            await self.log(task_id, text)
             if not limited and rate_limited_line(text):
                 limited = True
                 await self.terminate_process(process)
@@ -492,7 +503,6 @@ class UnityWorker:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            await self.log(task_id, f"ERROR: {exc}\n")
             await self.send({"type": "TASK_FAILED", "task_id": task_id, "run_id": run_id, "error": str(exc)})
 
     async def cancel(self, task_id: int) -> None:

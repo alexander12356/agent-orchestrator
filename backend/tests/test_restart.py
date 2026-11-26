@@ -8,7 +8,10 @@ from tests.conftest import make_task
 
 
 def test_restart_stops_the_running_agent_and_starts_another(client, agent):
-    command = 'python3 -c "print(\'started\', flush=True); import time; time.sleep(30)"'
+    command = (
+        'python3 -c "from pathlib import Path; import time; '
+        "next(Path.cwd().glob('.orchestrator-progress-*/updates.txt')).write_text('started' + chr(10)); time.sleep(30)\""
+    )
     updated = client.put(f"/api/agents/{agent['id']}", json={
         'name': 'Test bot',
         'primary_config': {'cli': 'custom', 'model': 'test', 'environment': 'server', 'command': command},

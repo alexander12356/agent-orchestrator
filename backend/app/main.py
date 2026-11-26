@@ -20,7 +20,6 @@ from .config import ROOT, settings
 from .database import branch_name, connect, decode_agent, decode_task, dumps, init_db, now, spent_tokens, transaction
 from .dispatcher import dispatcher, limits, task_dir
 from .events import bus
-from .runner import present_log_line
 from .schemas import AgentCreate, AgentUpdate, IntegrationSettings, ManualMerge, TaskCreate, TaskUpdate, TrackerAnswer
 from .tracker import BOT_PREFIX, YougileError, ensure_webhook, fetch_chat_message, fetch_import_tasks, integration_settings, test_connection
 from .worker_hub import hub
@@ -307,7 +306,11 @@ async def logs(task_id: int, request: Request) -> StreamingResponse:
 
     async def stream():
         with connect() as conn:
-            rows = conn.execute("SELECT * FROM events WHERE task_id=? ORDER BY id DESC LIMIT 100", (task_id,)).fetchall()
+            rows = conn.execute(
+                "SELECT id, task_id, stage, message, created_at FROM events "
+                "WHERE task_id=? AND is_activity=1 ORDER BY id DESC LIMIT 100",
+                (task_id,),
+            ).fetchall()
         for row in reversed(rows):
             yield f"data: {json.dumps(dict(row), ensure_ascii=False)}\n\n"
         async with bus.subscribe(task_id) as queue:
@@ -505,9 +508,9 @@ async def worker_socket(websocket: WebSocket, authorization: str | None = Header
             message = await websocket.receive_json()
             kind = message.get("type")
             if kind == "LOG_CHUNK":
-                visible = present_log_line(str(message.get("chunk", "")))
-                if visible.text:
-                    await bus.publish(int(message["task_id"]), 3, visible.text)
+                chunk = message.get("chunk")
+                if message.get("format") == "activity" and isinstance(chunk, str) and chunk.strip():
+                    await bus.publish(int(message["task_id"]), 3, chunk)
             elif kind == "TASK_COMPLETED":
                 await dispatcher.worker_completed(message)
             elif kind == "TASK_FAILED":
