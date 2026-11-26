@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
+import base64
 import json
 import os
 import re
@@ -195,6 +196,7 @@ class UnityWorker:
         self.unity = args.unity
         self.websocket: Any = None
         self.stopping = False
+        self.unity_queue = asyncio.Lock()
         self.jobs: dict[int, asyncio.Task[Any]] = {}
 
     async def send(self, message: dict[str, Any]) -> None:
@@ -276,8 +278,26 @@ class UnityWorker:
     async def run_unity(self, path: Path, task_id: int) -> str:
         if not self.unity:
             return "Unity Editor не настроен; сборка не запускалась."
-        with self.unity_mutex():
-            code, output = await self.execute(self.unity_command(path))
+        async def check_project():
+            async with self.unity_queue:
+                with self.unity_mutex():
+                    return await self.execute(self.unity_command(path))
+
+        code, output = await check_project()
+        if (code and self.unity.lower().endswith(".exe")
+                and "another unity instance is running with this project open" in output.lower()):
+            await self.log(task_id, f"Проект {windows_path(path)} открыт в Unity. Закрываю окно; "
+                           "если появится запрос сохранения, ответьте в редакторе в течение двух минут.\n")
+            script = Path(__file__).with_name("close_unity_window.ps1").read_text(encoding="ascii")
+            argument = windows_path(path).replace("'", "''")
+            command = f"& {{\n{script}\n}} -ProjectPath '{argument}'"
+            encoded = base64.b64encode(command.encode("utf-16-le")).decode("ascii")
+            shell = shutil.which("powershell.exe") or "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"
+            close_code, _ = await self.execute([shell, "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded])
+            if close_code:
+                raise RuntimeError(f"Unity не подтвердила закрытие окна {windows_path(path)}. "
+                                   "Проверьте диалог сохранения и закройте окно проекта.")
+            code, output = await check_project()
         if code:
             raise RuntimeError(f"Unity batchmode завершился с кодом {code}: {output}")
         return "Unity batchmode завершился успешно."

@@ -475,3 +475,28 @@ def test_existing_pr_is_updated_instead_of_reused_unchanged(tmp_path):
     edit = commands[1]
     assert edit[3] == url
     assert edit[edit.index('--body') + 1] == 'Updated body'
+
+@pytest.mark.parametrize("first_output,close_code,expected", [
+    ("another Unity instance is running with this project open", 0, ["unity", "close", "unity"]),
+    ("another Unity instance is running with this project open", 2, ["unity", "close"]),
+    ("compilation failed", 0, ["unity"]),
+])
+def test_unity_retries_only_after_editor_closes(tmp_path, first_output, close_code, expected):
+    worker = make_worker(tmp_path)
+    worker.unity = "Unity.exe"
+    calls = []
+
+    async def execute(command):
+        if "-EncodedCommand" in command:
+            calls.append("close")
+            return close_code, ""
+        calls.append("unity")
+        return (1, first_output) if len(calls) == 1 else (0, "")
+
+    worker.execute = execute
+    if expected[-1] == "unity" and len(expected) > 1:
+        asyncio.run(worker.run_unity(tmp_path, 59))
+    else:
+        with pytest.raises(RuntimeError):
+            asyncio.run(worker.run_unity(tmp_path, 59))
+    assert calls == expected
