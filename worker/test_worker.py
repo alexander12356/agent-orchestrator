@@ -384,7 +384,8 @@ def test_pr_details_require_specific_content_and_omit_empty_review_focus(tmp_pat
     assert 'Нет изменений относительно origin/main.' in body
 
 
-def test_assign_creates_pr_from_summary_and_keeps_service_files_out_of_commit(tmp_path):
+@pytest.mark.parametrize("repair", [False, True])
+def test_assign_creates_pr_from_summary_and_keeps_service_files_out_of_commit(tmp_path, repair):
     worker = make_worker(tmp_path)
     path = tmp_path / 'task-worktree'
     path.mkdir()
@@ -395,12 +396,17 @@ def test_assign_creates_pr_from_summary_and_keeps_service_files_out_of_commit(tm
     async def prepare_worktree(task_id, branch):
         return path
 
-    async def run_with_fallback(task_id, worktree, prompt, config, triggers, run_id):
+    async def run_with_fallback(task_id, worktree, prompt, config, triggers, run_id, previous_usage=None):
+        if prompts:
+            assert previous_usage is not None
+            assert "Test.cs(3,2): error CS0161" in prompt
         prompts.append(prompt)
         (path / module.PR_DETAILS_FILE).write_text(json.dumps(implementation_details()), encoding='utf-8')
         return KIMI, agent_result(output='raw CLI output')
 
     async def run_unity(worktree, task_id):
+        if repair and len(prompts) == 1:
+            raise module.UnityCompilationError("Test.cs(3,2): error CS0161")
         return 'Unity batchmode завершился успешно.'
 
     async def execute(command, cwd=None):
@@ -500,3 +506,18 @@ def test_unity_retries_only_after_editor_closes(tmp_path, first_output, close_co
         with pytest.raises(RuntimeError):
             asyncio.run(worker.run_unity(tmp_path, 59))
     assert calls == expected
+
+
+def test_compiler_error_includes_unique_diagnostics(tmp_path):
+    worker = make_worker(tmp_path)
+    worker.unity = "Unity.exe"
+    diagnostic = "Assets/Test.cs(3,2): error CS0161: missing return"
+    (tmp_path / "unity-build.log").write_text((diagnostic + "\n") * 2)
+
+    async def execute(command):
+        return 1, "Scripts have compiler errors."
+
+    worker.execute = execute
+    with pytest.raises(module.UnityCompilationError) as error:
+        asyncio.run(worker.run_unity(tmp_path, 59))
+    assert str(error.value).count(diagnostic) == 1

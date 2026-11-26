@@ -187,6 +187,10 @@ def zcode_environment() -> dict[str, str]:
     return environment
 
 
+class UnityCompilationError(RuntimeError):
+    pass
+
+
 class UnityWorker:
     def __init__(self, args: argparse.Namespace) -> None:
         self.server = args.server
@@ -298,6 +302,18 @@ class UnityWorker:
                 raise RuntimeError(f"Unity не подтвердила закрытие окна {windows_path(path)}. "
                                    "Проверьте диалог сохранения и закройте окно проекта.")
             code, output = await check_project()
+        if code and "scripts have compiler errors" in output.lower():
+            errors = {}
+            log_path = path / "unity-build.log"
+            if log_path.is_file():
+                with log_path.open(encoding="utf-8", errors="replace") as log:
+                    for line in log:
+                        if re.search(r"\berror CS\d+:", line):
+                            errors[line.strip()[:1000]] = None
+                            if len(errors) >= 20:
+                                break
+            raise UnityCompilationError("\n".join(["Unity: Scripts have compiler errors.", *errors,
+                                                   f"Полный журнал: {log_path}"]))
         if code:
             raise RuntimeError(f"Unity batchmode завершился с кодом {code}: {output}")
         return "Unity batchmode завершился успешно."
@@ -474,11 +490,12 @@ class UnityWorker:
             return f"код возврата {result['exit_code']}"
         return None
 
-    async def run_with_fallback(self, task_id: int, path: Path, prompt: str, config: dict[str, Any], triggers: dict[str, Any], run_id: int | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+    async def run_with_fallback(self, task_id: int, path: Path, prompt: str, config: dict[str, Any], triggers: dict[str, Any], run_id: int | None = None, previous_usage: dict[str, Any] | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
         timeout = int(triggers.get("timeout_minutes", 20))
         configs = [config["primary"], *config.get("fallback", [])]
-        totals = dict.fromkeys(FIELDS, 0)
-        partial = False
+        previous_usage = previous_usage or {}
+        totals = {key: previous_usage.get(key, 0) for key in FIELDS}
+        partial = previous_usage.get("usage_partial", False)
         failures: list[str] = []
         for index, candidate in enumerate(configs):
             label = self.config_label(candidate)
@@ -559,7 +576,17 @@ class UnityWorker:
                 "В review_focus укажи важные для ревью решения или ограничения. При отсутствии данных оставь соответствующий список пустым."
             )
             selected, result = await self.run_with_fallback(task_id, path, prompt, config, triggers, run_id)
-            unity_status = await self.run_unity(path, task_id)
+            try:
+                unity_status = await self.run_unity(path, task_id)
+            except UnityCompilationError as exc:
+                await self.log(task_id, f"Возвращаю исполнителю ошибки компиляции:\n{exc}\n")
+                repair_prompt = (f"{prompt}\nПервая реализация уже в рабочей копии. "
+                                 "Исправь ошибки компиляции ниже в этой копии и обнови резюме PR. "
+                                 f"Воркер повторно запустит Unity после исправления.\n{exc}")
+                selected, result = await self.run_with_fallback(
+                    task_id, path, repair_prompt, config, triggers, run_id, previous_usage=result,
+                )
+                unity_status = await self.run_unity(path, task_id)
             details = read_pr_details(details_path)
             docs.unlink(missing_ok=True)
             details_path.unlink(missing_ok=True)
