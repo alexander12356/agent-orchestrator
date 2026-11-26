@@ -8,6 +8,7 @@ from typing import Any, Iterator
 
 from .config import settings
 from .role_prompts import update_role_prompts
+from .usage import FIELDS, objects, normalize, kimi_usage, zcode_usage
 
 
 SCHEMA = """
@@ -122,6 +123,7 @@ def init_db() -> None:
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
     with connect() as conn:
         conn.executescript(SCHEMA)
+        conn.execute("BEGIN IMMEDIATE")
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
         for column in ("external_issue_key", "external_issue_url", "milestone", "sprint", "repository_url"):
             if column not in columns:
@@ -141,6 +143,9 @@ def init_db() -> None:
             conn.execute("ALTER TABLE stage_runs ADD COLUMN yougile_question_message_id INTEGER")
         if "reviewed_document" not in run_columns:
             conn.execute("ALTER TABLE stage_runs ADD COLUMN reviewed_document TEXT")
+        if "usage_partial" not in run_columns:
+            conn.execute("ALTER TABLE stage_runs ADD COLUMN usage_partial INTEGER NOT NULL DEFAULT 0")
+            restore_usage(conn)
         event_columns = {row["name"] for row in conn.execute("PRAGMA table_info(events)")}
         if "is_activity" not in event_columns:
             conn.execute("ALTER TABLE events ADD COLUMN is_activity INTEGER NOT NULL DEFAULT 0")
@@ -189,8 +194,67 @@ def decode_task(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def restore_usage(conn):
+    from .runner import KIMI_HOME
+
+    conn.execute("UPDATE stage_runs SET usage_partial=1 WHERE tokens_estimated OR is_fallback OR status!='completed'")
+    kimi_sessions = {}
+    for base in {KIMI_HOME, Path.home() / ".kimi-code"}:
+        for state in (base / "sessions").glob("*/session_*/state.json"):
+            try:
+                meta = json.loads(state.read_text(encoding="utf-8"))
+                created = datetime.fromtimestamp(meta["createdAt"] / 1000, UTC)
+                kimi_sessions.setdefault(meta["cwd"], []).append((created, state.parent))
+            except (OSError, ValueError, KeyError, TypeError, OverflowError):
+                continue
+    for run in conn.execute("SELECT r.*, t.worktree_path FROM stage_runs r JOIN tasks t ON t.id=r.task_id WHERE tokens_estimated OR cli_used IS NULL"):
+        if not run["finished_at"]:
+            continue
+        cwd = settings.storage_dir / "tasks" / str(run["task_id"])
+        log = cwd / "logs" / f"stage_{run['stage']}_attempt_{run['attempt']}.log"
+        try:
+            transcript = log.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            transcript = ""
+        usage = {}
+        if run["stage"] == 3 and run["worktree_path"]:
+            cwd = Path(run["worktree_path"])
+        start, end = (datetime.fromisoformat(run[k]) for k in ("started_at", "finished_at"))
+        sessions = [p for created, p in kimi_sessions.get(str(cwd), []) if start <= created <= end]
+        if len(sessions) == 1 and (run["cli_used"] == "kimi" or "Fallback: kimi" in transcript):
+            usage = kimi_usage(sessions[0], cwd)
+        if not usage and transcript:
+            ids = re.findall(r"(?im)^session id: ([a-f0-9-]{36})\s*$", transcript)
+            if len(ids) == 1:
+                for file in (Path.home() / ".codex/sessions").glob(f"*/*/*/*-{ids[0]}.jsonl"):
+                    try:
+                        with file.open(encoding="utf-8", errors="replace") as stream:
+                            matched = False
+                            for event in objects(stream):
+                                payload = event.get("payload")
+                                if not isinstance(payload, dict):
+                                    continue
+                                if event.get("type") == "session_meta":
+                                    matched = payload.get("cwd") == str(cwd) and payload.get("id") == ids[0]
+                                info = payload.get("info")
+                                if matched and payload.get("type") == "token_count" and isinstance(info, dict):
+                                    usage = normalize(info.get("total_token_usage")) or usage
+                    except OSError:
+                        continue
+        zcode = zcode_usage(cwd, start, end) if run["cli_used"] == "zcode" or "Fallback: zcode" in transcript else {}
+        if zcode:
+            usage = {key: usage.get(key, 0) + zcode[key] for key in FIELDS}
+        if usage:
+            partial = bool(run["is_fallback"] or run["status"] != "completed")
+            conn.execute("UPDATE stage_runs SET input_tokens=?, cache_tokens=?, output_tokens=?, tokens_estimated=0, usage_partial=? WHERE id=?",
+                         (*(usage[k] for k in FIELDS), partial, run["id"]))
+
+
+def token_summary(conn, task_id):
+    sums = ", ".join(f"COALESCE(SUM(CASE WHEN tokens_estimated=0 THEN {k} END),0) AS {k}" for k in FIELDS)
+    return dict(conn.execute(f"SELECT {sums}, COALESCE(MAX(usage_partial OR tokens_estimated),0) AS usage_partial FROM stage_runs WHERE task_id=?", (task_id,)).fetchone())
+
+
 def spent_tokens(conn: sqlite3.Connection, task_id: int) -> int:
-    return conn.execute(
-        "SELECT COALESCE(SUM(input_tokens+output_tokens+cache_tokens), 0) AS total FROM stage_runs WHERE task_id=?",
-        (task_id,),
-    ).fetchone()["total"]
+    values = token_summary(conn, task_id)
+    return sum(values[k] for k in FIELDS)

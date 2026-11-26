@@ -1,6 +1,7 @@
-import { Check, ChevronRight, Flame, ListTodo, LockKeyhole, Play, Plus, Search, Square, Trash2, UserRound } from 'lucide-react';
+import TokenUsage from './TokenUsage';
+import { Check, ChevronRight, ListTodo, LockKeyhole, Play, Plus, Search, Square, Trash2, UserRound } from 'lucide-react';
 import { FormEvent, useMemo, useState } from 'react';
-import { api, canStartPipeline, fmtTokens } from './api';
+import { api, canStartPipeline } from './api';
 import { Avatar, Empty, Modal, StageBadge } from './components';
 import { Agent, Task } from './types';
 
@@ -47,9 +48,7 @@ export default function Tasks({ tasks, agents, reload, openTask, onDeleted, noti
           <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px]">
             {task.external_issue_id && (task.external_issue_url ? <a className="text-indigo-400 hover:text-indigo-300" href={task.external_issue_url} target="_blank" rel="noreferrer">{task.external_issue_key || task.external_issue_id} ↗</a> : <span className="text-slate-600">{task.external_issue_key || task.external_issue_id}</span>)}
             {(task.milestone || task.sprint) && <span className="flex items-center gap-1 rounded bg-slate-800/70 px-2 py-0.5 text-slate-400">{task.milestone && <span>{task.milestone}</span>}{task.milestone && task.sprint && <ChevronRight size={11}/>} {task.sprint && <span>{task.sprint}</span>}</span>}
-            <span className="badge badge-orange tabular-nums" title={`Всего потрачено ${task.total_tokens.toLocaleString('ru-RU')} токенов`}>
-              <Flame size={11} aria-hidden="true"/>{fmtTokens(task.total_tokens)} токенов
-            </span>
+            <TokenUsage usage={task}/>
           </div>
         </td>
         <td className="px-3 py-4"><StageBadge task={task}/></td>

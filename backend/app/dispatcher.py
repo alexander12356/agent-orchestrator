@@ -184,7 +184,7 @@ class Dispatcher:
     def recover(self) -> None:
         with connect() as conn:
             conn.execute(
-                "UPDATE stage_runs SET status='error', error=?, finished_at=? WHERE status='running'",
+                "UPDATE stage_runs SET status='error', usage_partial=1, error=?, finished_at=? WHERE status='running'",
                 ("Сессия прервана: сервер был перезапущен", now()),
             )
             conn.execute("UPDATE tasks SET status='queued', updated_at=? WHERE status='running'", (now(),))
@@ -290,7 +290,7 @@ class Dispatcher:
             return
         with connect() as conn:
             conn.execute(
-                "UPDATE stage_runs SET status='error', error=?, finished_at=? WHERE id=? AND status='running'",
+                "UPDATE stage_runs SET status='error', usage_partial=1, error=?, finished_at=? WHERE id=? AND status='running'",
                 ("Остановлено перезапуском", now(), run_id),
             )
 
@@ -581,6 +581,12 @@ class Dispatcher:
                 result = await runner.run(
                     config, prompt, directory, env, agent["fallback_triggers"].get("timeout_minutes", 20),
                 )
+                with transaction() as conn:
+                    conn.execute(
+                        "UPDATE stage_runs SET input_tokens=input_tokens+?, cache_tokens=cache_tokens+?, "
+                        "output_tokens=output_tokens+?, usage_partial=MAX(usage_partial, ?) WHERE id=?",
+                        (result.input_tokens, result.cache_tokens, result.output_tokens, int(result.estimated), run_id),
+                    )
                 if task["id"] in self.stop_requested:
                     self._mark_stopped(run_id)
                     return
@@ -615,8 +621,8 @@ class Dispatcher:
         error = None if success else validation_error or describe_failure(result, artifact_name)
         with transaction() as conn:
             conn.execute(
-                "UPDATE stage_runs SET cli_used=?, model_used=?, is_fallback=?, artifact_path=?, input_tokens=?, output_tokens=?, cache_tokens=?, tokens_estimated=?, status=?, finished_at=?, error=? WHERE id=?",
-                (config["cli"], config.get("model", ""), int(configs.index(config) > 0), str(artifact), result.input_tokens, result.output_tokens, result.cache_tokens, int(result.estimated), status, now(), error, run_id),
+                "UPDATE stage_runs SET cli_used=?, model_used=?, is_fallback=?, artifact_path=?, status=?, finished_at=?, error=? WHERE id=?",
+                (config["cli"], config.get("model", ""), int(configs.index(config) > 0), str(artifact), status, now(), error, run_id),
             )
         if not success:
             raise StageFailure(error, retryable=not result.timed_out and not result.rate_limited and result.exit_code != 127)
@@ -716,8 +722,8 @@ class Dispatcher:
             artifact = task_dir(task_id) / f"03_impl_report_v{attempt}.md"
             artifact.write_text(report, encoding="utf-8")
             conn.execute(
-                "UPDATE stage_runs SET artifact_path=?, cli_used=?, model_used=?, is_fallback=?, input_tokens=?, output_tokens=?, cache_tokens=?, tokens_estimated=?, status='completed', finished_at=? WHERE id=?",
-                (str(artifact), message.get("cli_used"), message.get("model_used", ""), int(message.get("is_fallback", False)), int(message.get("input_tokens", 0)), int(message.get("output_tokens", 0)), int(message.get("cache_tokens", 0)), int(message.get("tokens_estimated", message.get("estimated", False))), now(), run_id),
+                "UPDATE stage_runs SET artifact_path=?, cli_used=?, model_used=?, is_fallback=?, input_tokens=?, output_tokens=?, cache_tokens=?, tokens_estimated=?, usage_partial=?, status='completed', finished_at=? WHERE id=?",
+                (str(artifact), message.get("cli_used"), message.get("model_used", ""), int(message.get("is_fallback", False)), int(message.get("input_tokens", 0)), int(message.get("output_tokens", 0)), int(message.get("cache_tokens", 0)), int(message.get("tokens_estimated", message.get("estimated", False))), int(message.get("usage_partial", message.get("is_fallback", False)) or "input_tokens" not in message), now(), run_id),
             )
             conn.execute(
                 "UPDATE tasks SET pr_url=COALESCE(?, pr_url), worktree_path=?, current_stage=4, status=CASE WHEN single_stage THEN 'stage_ready' ELSE 'queued' END, auto_retries=0, hold_reason=NULL, updated_at=? WHERE id=?",
@@ -733,7 +739,7 @@ class Dispatcher:
             if not run or run["status"] != "running":
                 return
             error = str(message.get("error", "Worker failed"))
-            conn.execute("UPDATE stage_runs SET status='error', error=?, finished_at=? WHERE id=?", (error, now(), run_id))
+            conn.execute("UPDATE stage_runs SET status='error', usage_partial=1, error=?, finished_at=? WHERE id=?", (error, now(), run_id))
             conn.execute("UPDATE tasks SET status='error', updated_at=? WHERE id=?", (now(), task_id))
         self.active.pop(task_id, None)
         summary = error.partition("\n")[0] or "Worker failed"
@@ -823,7 +829,7 @@ class Dispatcher:
             await hub.send({"type": "CANCEL_TASK", "task_id": task_id})
         with connect() as conn:
             conn.execute(
-                "UPDATE stage_runs SET status='error', error=?, finished_at=? WHERE task_id=? AND status='running'",
+                "UPDATE stage_runs SET status='error', usage_partial=1, error=?, finished_at=? WHERE task_id=? AND status='running'",
                 ("Остановлено перезапуском", now(), task_id),
             )
             # A person restarting a stage gives it a fresh retry budget and return counter.

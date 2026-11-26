@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config import ROOT, settings
-from .database import branch_name, connect, decode_agent, decode_task, dumps, init_db, now, spent_tokens, transaction
+from .database import branch_name, connect, decode_agent, decode_task, dumps, init_db, now, token_summary, transaction
 from .dispatcher import dispatcher, limits, task_dir
 from .events import bus
 from .schemas import AgentCreate, AgentUpdate, IntegrationSettings, ManualMerge, TaskCreate, TaskUpdate, TrackerAnswer
@@ -60,7 +60,8 @@ def task_view(task: dict[str, Any], conn: Any, default_budget: int = 0) -> dict[
     task["dependencies"] = [dict(row) for row in dependencies]
     agent_id = task["stage_agents"].get(task["current_stage"]) if task["status"] != "open" else None
     task["current_agent"] = decode_agent(conn.execute("SELECT * FROM agents WHERE id=?", (agent_id,)).fetchone()) if agent_id else None
-    task["total_tokens"] = spent_tokens(conn, task["id"])
+    task.update(token_summary(conn, task["id"]))
+    task["total_tokens"] = task["input_tokens"] + task["cache_tokens"] + task["output_tokens"]
     # The budget the dispatcher enforces: the task's own, else the shared one.
     task["token_budget_effective"] = int(task["token_budget"]) if task.get("token_budget") is not None else default_budget
     return task
@@ -197,6 +198,10 @@ def task_detail(task_id: int) -> dict[str, Any]:
     with connect() as conn:
         result = task_view(task, conn, default_budget)
         result["runs"] = [dict(row) for row in conn.execute("SELECT * FROM stage_runs WHERE task_id=? ORDER BY id", (task_id,))]
+        for run in result["runs"]:
+            if run["tokens_estimated"]:
+                run.update(input_tokens=0, output_tokens=0, cache_tokens=0, usage_partial=True)
+
     return result
 
 
@@ -511,6 +516,16 @@ async def worker_socket(websocket: WebSocket, authorization: str | None = Header
                 chunk = message.get("chunk")
                 if message.get("format") == "activity" and isinstance(chunk, str) and chunk.strip():
                     await bus.publish(int(message["task_id"]), 3, chunk)
+            elif kind == "TASK_USAGE":
+                counts = tuple(message.get(key) for key in ("input_tokens", "cache_tokens", "output_tokens"))
+                if any(type(count) is not int or not 0 <= count < 2**63 for count in counts):
+                    continue
+                with connect() as conn:
+                    conn.execute(
+                        "UPDATE stage_runs SET input_tokens=?, cache_tokens=?, output_tokens=?, usage_partial=? "
+                        "WHERE id=? AND task_id=? AND stage=3 AND status='running'",
+                        (*counts, int(bool(message.get("usage_partial"))), message["run_id"], message["task_id"]),
+                    )
             elif kind == "TASK_COMPLETED":
                 await dispatcher.worker_completed(message)
             elif kind == "TASK_FAILED":

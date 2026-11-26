@@ -1,3 +1,4 @@
+import TokenUsage from './TokenUsage';
 import { Background, Controls, Edge, Handle, MarkerType, Node, NodeProps, Position, ReactFlow } from '@xyflow/react';
 import { Bot, CheckCircle2, FileCode2, Flame, GitPullRequest, RotateCcw, UserRound } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
@@ -63,7 +64,7 @@ export default function Graph({ task, tasks, agents, reload, selectTask, notify 
     return result;
   }, [task, runs, selectedEdge, openArtifactEdge]);
   return <main className="flex h-[calc(100vh-65px)] flex-col">
-    <header className="flex items-center justify-between border-b border-slate-800 bg-slate-950/40 px-5 py-3"><div className="flex items-center gap-3"><GitPullRequest size={18} className="text-indigo-400"/><select className="!w-auto min-w-64 !border-0 !bg-transparent !py-1 text-sm font-medium" value={task.id} onChange={e => selectTask(Number(e.target.value))}>{tasks.map(t => <option key={t.id} value={t.id}>#{t.id} {t.title}</option>)}</select></div><span className="badge badge-orange"><Flame size={13}/>{fmtTokens(task.total_tokens)}{task.token_budget_effective ? ` из ${fmtTokens(task.token_budget_effective)}` : ''} токенов</span></header>
+    <header className="flex items-center justify-between border-b border-slate-800 bg-slate-950/40 px-5 py-3"><div className="flex items-center gap-3"><GitPullRequest size={18} className="text-indigo-400"/><select className="!w-auto min-w-64 !border-0 !bg-transparent !py-1 text-sm font-medium" value={task.id} onChange={e => selectTask(Number(e.target.value))}>{tasks.map(t => <option key={t.id} value={t.id}>#{t.id} {t.title}</option>)}</select></div><div className="flex flex-wrap items-center justify-end gap-2"><TokenUsage usage={task}/>{!!task.token_budget_effective && <span className="badge badge-orange">Бюджет {fmtTokens(task.token_budget_effective)}</span>}</div></header>
     <div className="grid min-h-0 flex-1 lg:grid-cols-[minmax(0,7fr)_minmax(330px,3fr)]">
       <div className="relative min-h-[400px] border-r border-slate-800"><ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} fitView minZoom={.4} maxZoom={1.5} nodesDraggable={false} nodesConnectable={false} onNodeClick={(_, node) => { setSelectedStage(Number(node.id)); setSelectedEdge(''); setInspectorTab('stage'); }} onEdgeClick={(_, edge) => openArtifactEdge(edge.id, Number(edge.source), Number(edge.target))} colorMode="dark"><Background color="#1c2940" gap={24}/><Controls/></ReactFlow></div>
       <aside className="scrollbar min-h-0 overflow-y-auto bg-[#0d1524]"><Inspector task={task} stage={selectedStage} tab={inspectorTab} onTabChange={setInspectorTab} reload={reload} notify={notify}/></aside>

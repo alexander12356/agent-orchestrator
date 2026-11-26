@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from app.runner import ProcessRunner, build_command, cli_environment, estimate_usage, extract_usage, rate_limited_line
+from app.runner import ProcessRunner, build_command, cli_environment, extract_usage, rate_limited_line
 
 
 def test_codex_runs_outside_the_task_directory():
@@ -175,8 +175,10 @@ def test_long_stream_lines_are_read_instead_of_failing(monkeypatch, tmp_path):
     assert logged == []
 
 
-def test_usage_fallback_is_marked_estimated():
-    assert estimate_usage('some prompt', 'some output')['estimated'] is True
+def test_codex_cached_input_counted_once():
+    event = '{"type":"turn.completed","usage":{"input_tokens":200,"cached_input_tokens":150,"output_tokens":5}}'
+    assert extract_usage(event) == dict(input_tokens=50, cache_tokens=150, output_tokens=5, estimated=False)
+    assert extract_usage("some output") == {}
 
 
 def test_limit_is_reported_only_by_error_lines():

@@ -14,7 +14,7 @@ spec.loader.exec_module(module)
 
 
 def test_parse_structured_usage():
-    result = module.parse_usage('prompt', '{"usage":{"input_tokens":20,"output_tokens":5}}')
+    result = module.extract_usage('{"usage":{"input_tokens":20,"output_tokens":5}}')
     assert result['input_tokens'] == 20
     assert result['estimated'] is False
 
@@ -35,8 +35,8 @@ def test_kimi_implementer_uses_model_and_low_effort(monkeypatch, tmp_path):
     assert module.kimi_environment({"reasoning_effort": "low"})["KIMI_MODEL_THINKING_EFFORT"] == "low"
 
 
-def test_parse_usage_estimate():
-    assert module.parse_usage('prompt', 'plain output')['estimated'] is True
+def test_missing_usage_is_unknown():
+    assert module.extract_usage('plain output') == {}
 
 
 def test_zcode_implementer_runs_a_headless_yolo_prompt(monkeypatch):
@@ -213,11 +213,12 @@ ZCODE = {'cli': 'zcode', 'model': 'account:zai/GLM-5.4'}
 
 
 def test_failed_primary_switches_to_fallback(tmp_path):
-    worker, calls = fallback_worker(tmp_path, [agent_result(1), agent_result(0)])
+    worker, calls = fallback_worker(tmp_path, [{**agent_result(1), "input_tokens": 5, "estimated": False}, {**agent_result(0), "input_tokens": 12, "estimated": False}])
     selected, result = run_fallback(worker, {'primary': KIMI, 'fallback': [ZCODE]})
     assert [call['cli'] for call in calls] == ['kimi', 'zcode']
     assert selected == ZCODE
     assert result['exit_code'] == 0
+    assert result['input_tokens'] == 17
     assert any('kimi (kimi-code/k3.1-pro): код возврата 1. Переключаюсь на fallback: zcode (account:zai/GLM-5.4)' in line for line in worker.logs)
 
 
@@ -351,7 +352,7 @@ def test_assign_creates_pr_from_summary_and_keeps_service_files_out_of_commit(tm
     async def prepare_worktree(task_id, branch):
         return path
 
-    async def run_with_fallback(task_id, worktree, prompt, config, triggers):
+    async def run_with_fallback(task_id, worktree, prompt, config, triggers, run_id):
         prompts.append(prompt)
         (path / module.PR_DETAILS_FILE).write_text(json.dumps(implementation_details()), encoding='utf-8')
         return KIMI, agent_result(output='raw CLI output')

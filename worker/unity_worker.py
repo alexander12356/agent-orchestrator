@@ -10,6 +10,7 @@ import signal
 import sys
 from contextlib import contextmanager, suppress
 from pathlib import Path
+from datetime import UTC, datetime
 from typing import Any
 
 import websockets
@@ -17,6 +18,7 @@ import websockets
 # The worker can be started directly as a script from any working directory.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from backend.app.progress import progress_prompt
+from backend.app.usage import extract_usage, zcode_usage, FIELDS
 
 RATE_LIMIT_RE = re.compile(r"rate.?limit|usage.?limit|quota exceeded|\b429\b|try again later", re.I)
 # A plain text line has to read like a CLI error report before it is checked for a limit.
@@ -205,6 +207,7 @@ class UnityWorker:
         await self.send({"type": "LOG_CHUNK", "task_id": task_id, "chunk": text, "format": "activity"})
 
     async def execute(self, command: list[str], cwd: Path | None = None) -> tuple[int, str]:
+        started = datetime.now(UTC)
         process = await asyncio.create_subprocess_exec(*command, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
         assert process.stdout
         output, _ = await process.communicate()
@@ -289,7 +292,7 @@ class UnityWorker:
         if cli == "claude":
             args = ["claude", "-p", prompt, "--output-format", "json"]
         elif cli == "codex":
-            args = ["codex", "exec", prompt]
+            args = ["codex", "exec", "--json", prompt]
         elif cli == "kimi":
             return kimi_command(config, prompt)
         elif cli == "zcode":
@@ -391,7 +394,10 @@ class UnityWorker:
             limited = False
         elif not limited and not timed_out and limited_in_tail(lines):
             limited = True
-        usage = parse_usage(prompt, output)
+        usage = extract_usage(output, path, env.get("KIMI_CODE_HOME", Path.home() / ".kimi-code"))
+        if not usage and config.get("cli") == "zcode":
+            usage = zcode_usage(path, started, datetime.now(UTC))
+        usage = usage or {"estimated": True}
         return {"exit_code": process.returncode or 0, "output": output, "rate_limited": limited, "timed_out": timed_out, **usage}
 
     @staticmethod
@@ -410,9 +416,11 @@ class UnityWorker:
             return f"код возврата {result['exit_code']}"
         return None
 
-    async def run_with_fallback(self, task_id: int, path: Path, prompt: str, config: dict[str, Any], triggers: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    async def run_with_fallback(self, task_id: int, path: Path, prompt: str, config: dict[str, Any], triggers: dict[str, Any], run_id: int | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
         timeout = int(triggers.get("timeout_minutes", 20))
         configs = [config["primary"], *config.get("fallback", [])]
+        totals = dict.fromkeys(FIELDS, 0)
+        partial = False
         failures: list[str] = []
         for index, candidate in enumerate(configs):
             label = self.config_label(candidate)
@@ -421,15 +429,21 @@ class UnityWorker:
             try:
                 result = await self.run_agent(task_id, path, candidate, prompt, timeout)
             except Exception as exc:
+                partial = True
                 failures.append(f"{label}: {exc}")
                 if index == len(configs) - 1:
                     break
                 next_label = self.config_label(configs[index + 1])
                 await self.log(task_id, f"{label}: не удалось запустить CLI ({exc}). Переключаюсь на fallback: {next_label}\n")
                 continue
+            for key in FIELDS:
+                totals[key] += result.get(key, 0)
+            partial |= result.get("estimated", False)
+            if run_id is not None:
+                await self.send({"type": "TASK_USAGE", "task_id": task_id, "run_id": run_id, **totals, "usage_partial": partial})
             details = self.failure_details(result, timeout)
             if details is None:
-                return candidate, result
+                return candidate, {**result, **totals, "estimated": False, "usage_partial": partial}
             failures.append(f"{label}: {details}")
             if index == len(configs) - 1:
                 break
@@ -481,7 +495,7 @@ class UnityWorker:
                 "В validation укажи команды реально выполненных проверок и их результаты. "
                 "В review_focus укажи важные для ревью решения или ограничения. При отсутствии данных оставь соответствующий список пустым."
             )
-            selected, result = await self.run_with_fallback(task_id, path, prompt, config, triggers)
+            selected, result = await self.run_with_fallback(task_id, path, prompt, config, triggers, run_id)
             unity_status = await self.run_unity(path, task_id)
             details = read_pr_details(details_path)
             docs.unlink(missing_ok=True)
@@ -498,7 +512,7 @@ class UnityWorker:
             )
             pr_url = await self.upsert_pr(path, message["branch_name"], title, pr_body)
             report = f"# Отчет реализации\n\nPR: {pr_url}\n\n{pr_body}"
-            await self.send({"type": "TASK_COMPLETED", "task_id": task_id, "run_id": run_id, "report": report, "pr_url": pr_url, "worktree_path": str(path), "cli_used": selected.get("cli"), "model_used": selected.get("model", ""), "is_fallback": selected != config["primary"], **{k: v for k, v in result.items() if k in ("input_tokens", "output_tokens", "cache_tokens", "estimated")}})
+            await self.send({"type": "TASK_COMPLETED", "task_id": task_id, "run_id": run_id, "report": report, "pr_url": pr_url, "worktree_path": str(path), "cli_used": selected.get("cli"), "model_used": selected.get("model", ""), "is_fallback": selected != config["primary"], **{k: v for k, v in result.items() if k in ("input_tokens", "output_tokens", "cache_tokens", "estimated", "usage_partial")}})
             await self.send({"type": "TASK_META", "task_id": task_id, "tokens_estimated": result.get("estimated", False)})
         except asyncio.CancelledError:
             raise
@@ -561,24 +575,6 @@ class UnityWorker:
                 print(f"Подключение потеряно: {exc}; повтор через 5 секунд")
             if not self.stopping:
                 await asyncio.sleep(5)
-
-
-def parse_usage(prompt: str, output: str) -> dict[str, Any]:
-    for line in reversed(output.splitlines()):
-        try:
-            data = json.loads(line)
-            usage = data.get("usage", data)
-            if usage.get("input_tokens") or usage.get("output_tokens"):
-                return {"input_tokens": usage.get("input_tokens", 0), "output_tokens": usage.get("output_tokens", 0), "cache_tokens": usage.get("cache_read_input_tokens", 0), "estimated": False}
-        except (json.JSONDecodeError, AttributeError):
-            pass
-    try:
-        import tiktoken
-        encoding = tiktoken.get_encoding("cl100k_base")
-        count = lambda value: len(encoding.encode(value))
-    except (ImportError, ValueError):
-        count = lambda value: max(1, len(value) // 4)
-    return {"input_tokens": count(prompt), "output_tokens": count(output), "cache_tokens": 0, "estimated": True}
 
 
 def main() -> None:

@@ -35,14 +35,17 @@ const architect: Agent = {
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
-it('shows total token usage for each task in the list', () => {
-  const spentTask = { ...task, id: 8, title: 'Processed task', total_tokens: 12564 };
+it('shows each token category for each task in the list', () => {
+  const spentTask = { ...task, id: 8, title: 'Processed task', total_tokens: 12564, input_tokens: 12000, cache_tokens: 64, output_tokens: 500, usage_partial: true };
   render(<Tasks tasks={[task, spentTask]} agents={[]} reload={vi.fn()} openTask={vi.fn()} onDeleted={vi.fn()} notify={vi.fn()}/>);
 
   const unstarted = screen.getByRole('row', { name: /Imported task/ });
   const processed = screen.getByRole('row', { name: /Processed task/ });
-  expect(within(unstarted).getByText('0 токенов')).toBeInTheDocument();
-  expect(within(processed).getByText('12.6k токенов')).toHaveAttribute('title', `Всего потрачено ${spentTask.total_tokens.toLocaleString('ru-RU')} токенов`);
+  expect(within(unstarted).getByText('Вход 0')).toBeInTheDocument();
+  expect(within(processed).getByText('Вход 12.0k')).toHaveClass('text-sky-300');
+  expect(within(processed).getByText('Кэш 64')).toHaveClass('text-violet-300');
+  expect(within(processed).getByText('Выход 500')).toHaveClass('text-emerald-300');
+  expect(within(processed).getByText('Неполные данные')).toBeInTheDocument();
 });
 
 describe('Task deletion', () => {

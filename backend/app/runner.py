@@ -8,9 +8,11 @@ import shutil
 import signal
 from dataclasses import dataclass
 from pathlib import Path
+from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable
 
 from .progress import progress_prompt
+from .usage import extract_usage, zcode_usage
 
 RATE_LIMIT_RE = re.compile(r"rate.?limit|usage.?limit|quota exceeded|\b429\b|try again later", re.I)
 # A plain text line has to read like a CLI error report before it is checked for a limit.
@@ -69,11 +71,19 @@ class ProcessRunner:
         self, config: dict[str, Any], prompt: str, cwd: Path, env: dict[str, str], timeout_minutes: int,
     ) -> RunResult:
         command = build_command(config, prompt, cwd, int(env.get("ORCHESTRATOR_STAGE", "0")), Path(env["ORCHESTRATOR_REPO"]) if env.get("ORCHESTRATOR_REPO") else None)
+        env = {**os.environ, **env, **cli_environment(config)}
+        started = datetime.now(UTC)
+
+        def measured_usage(output):
+            usage = extract_usage(output, cwd, env.get("KIMI_CODE_HOME", Path.home() / ".kimi-code"))
+            if not usage and Path(command[0]).stem.lower() == "zcode":
+                usage = zcode_usage(cwd, started, datetime.now(UTC))
+            return usage or {"estimated": True}
         try:
             process = await asyncio.create_subprocess_exec(
                 *command,
                 cwd=cwd,
-                env={**os.environ, **env, **cli_environment(config)},
+                env=env,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
@@ -124,7 +134,9 @@ class ProcessRunner:
                     await process.wait()
         except TimeoutError:
             await stop_cli()
-            return RunResult(-1, "".join(lines), rate_limited=limited, timed_out=not limited)
+            output = "".join(lines)
+            usage = {**measured_usage(output), "estimated": True}
+            return RunResult(-1, output, **usage, rate_limited=limited, timed_out=not limited)
         except (asyncio.CancelledError, Exception):
             await stop_cli()
             raise
@@ -135,9 +147,7 @@ class ProcessRunner:
         # limit on a line that does not look like an error report.
         if not limited and (process.returncode or 0) != 0 and limited_in_tail(lines):
             limited = True
-        usage = extract_usage(output)
-        if not usage:
-            usage = estimate_usage(prompt, output)
+        usage = measured_usage(output)
         return RunResult(process.returncode or 0, output, **usage, rate_limited=limited)
 
 
@@ -194,7 +204,7 @@ def build_command(config: dict[str, Any], prompt: str, cwd: Path, stage: int = 0
     if cli == "claude":
         args = ["claude", "-p", prompt, "--output-format", "json"]
     elif cli == "codex":
-        args = ["codex", "exec", "--skip-git-repo-check", "-s", "workspace-write"]
+        args = ["codex", "exec", "--skip-git-repo-check", "-s", "workspace-write", "--json"]
         if model:
             args.extend(["--model", model])
         effort = str(config.get("reasoning_effort") or "").strip()
@@ -320,49 +330,3 @@ def _with_live_output(args: list[str]) -> list[str]:
     if "--stream-partial-output" not in rewritten:
         rewritten.insert(1, "--stream-partial-output")
     return rewritten
-
-
-def extract_usage(output: str) -> dict[str, int | bool]:
-    for line in reversed(output.splitlines()):
-        try:
-            data = json.loads(line)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if not isinstance(data, dict):
-            continue
-        result = data.get("result")
-        candidates = [data, data.get("usage"), result.get("usage") if isinstance(result, dict) else None]
-        for usage in candidates:
-            if not isinstance(usage, dict):
-                continue
-            input_tokens = usage.get("input_tokens", usage.get("inputTokens", usage.get("prompt_tokens", 0))) or 0
-            output_tokens = usage.get("output_tokens", usage.get("outputTokens", usage.get("completion_tokens", 0))) or 0
-            cache_tokens = usage.get("cache_read_input_tokens", usage.get("cacheReadTokens", usage.get("cached_tokens", 0))) or 0
-            if input_tokens or output_tokens:
-                return {
-                    "input_tokens": int(input_tokens),
-                    "output_tokens": int(output_tokens),
-                    "cache_tokens": int(cache_tokens),
-                    "estimated": False,
-                }
-    match = re.findall(r"(?:input|prompt)[ _-]?tokens?[:= ]+(\d+)", output, re.I)
-    output_match = re.findall(r"(?:output|completion)[ _-]?tokens?[:= ]+(\d+)", output, re.I)
-    if match or output_match:
-        return {
-            "input_tokens": int(match[-1]) if match else 0,
-            "output_tokens": int(output_match[-1]) if output_match else 0,
-            "cache_tokens": 0,
-            "estimated": False,
-        }
-    return {}
-
-
-def estimate_usage(prompt: str, output: str) -> dict[str, int | bool]:
-    try:
-        import tiktoken
-
-        encoding = tiktoken.get_encoding("cl100k_base")
-        count = lambda text: len(encoding.encode(text))
-    except (ImportError, ValueError):
-        count = lambda text: max(1, len(text) // 4)
-    return {"input_tokens": count(prompt), "output_tokens": count(output), "cache_tokens": 0, "estimated": True}
