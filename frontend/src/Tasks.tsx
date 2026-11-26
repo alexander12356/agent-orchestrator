@@ -1,7 +1,7 @@
 import TokenUsage from './TokenUsage';
-import { Check, ChevronRight, ListTodo, LockKeyhole, Play, Plus, Search, Square, Trash2, UserRound } from 'lucide-react';
+import { Check, ChevronRight, ListTodo, LockKeyhole, Pause, Play, Plus, Search, Square, Trash2, UserRound } from 'lucide-react';
 import { FormEvent, useMemo, useState } from 'react';
-import { api, canStartPipeline } from './api';
+import { api, canPausePipeline, canStartPipeline } from './api';
 import { Avatar, Empty, Modal, StageBadge } from './components';
 import { Agent, Task } from './types';
 
@@ -11,9 +11,9 @@ export default function Tasks({ tasks, agents, reload, openTask, onDeleted, noti
   const [filter, setFilter] = useState('all');
   const [search, setSearch] = useState('');
   const [editing, setEditing] = useState<Task | 'new' | null>(null);
-  const [starting, setStarting] = useState<number | null>(null);
+  const [pending, setPending] = useState<number | null>(null);
   const visible = useMemo(() => tasks.filter(task => {
-    const byFilter = filter === 'all' || (filter === 'open' && task.status === 'open') || (filter === 'active' && ['running', 'queued', 'waiting_worker'].includes(task.status)) || (filter === 'waiting' && ['blocked_main', 'waiting_answer', 'stage_ready', 'needs_human', 'error'].includes(task.status)) || (filter === 'pr' && task.current_stage === 5) || (filter === 'done' && task.current_stage === 6);
+    const byFilter = filter === 'all' || (filter === 'open' && task.status === 'open') || (filter === 'active' && canPausePipeline(task)) || (filter === 'waiting' && ['blocked_main', 'waiting_answer', 'stage_ready', 'needs_human', 'error', 'paused'].includes(task.status)) || (filter === 'pr' && task.current_stage === 5) || (filter === 'done' && task.current_stage === 6);
     return byFilter && `${task.id} ${task.title} ${task.description} ${task.external_issue_key || ''} ${task.milestone || ''} ${task.sprint || ''}`.toLowerCase().includes(search.toLowerCase());
   }), [tasks, filter, search]);
   const remove = async (task: Task) => {
@@ -24,14 +24,15 @@ export default function Tasks({ tasks, agents, reload, openTask, onDeleted, noti
       notify(`Задача #${task.id} удалена`);
     } catch (error) { notify((error as Error).message); }
   };
-  const start = async (task: Task) => {
-    setStarting(task.id);
+  const changeExecution = async (task: Task, action: 'start' | 'pause') => {
+    setPending(task.id);
     try {
-      await api(`/tasks/${task.id}/start`, { method: 'POST' });
-      reload();
-      notify(task.status === 'needs_human' ? `Задача #${task.id} продолжена` : `Пайплайн задачи #${task.id} запущен`);
+      await api(`/tasks/${task.id}/${action}`, { method: 'POST' });
+      await reload();
+      if (action === 'pause') notify(`Пайплайн задачи #${task.id} приостановлен`);
+      else notify(['needs_human', 'paused'].includes(task.status) ? `Задача #${task.id} продолжена` : `Пайплайн задачи #${task.id} запущен`);
     } catch (error) { notify((error as Error).message); }
-    finally { setStarting(null); }
+    finally { setPending(null); }
   };
   return <main className="mx-auto max-w-[1500px] p-7">
     <div className="mb-6 flex flex-wrap items-center justify-between gap-4"><div><h1 className="text-2xl font-semibold tracking-tight">Задачи</h1><p className="mt-1 text-sm text-slate-500">Управление полным циклом разработки</p></div><button className="btn btn-primary" onClick={() => setEditing('new')}><Plus size={16}/> Новая задача</button></div>
@@ -54,7 +55,11 @@ export default function Tasks({ tasks, agents, reload, openTask, onDeleted, noti
         <td className="px-3 py-4"><StageBadge task={task}/></td>
         <td className="px-3 py-4">{task.status === 'open' || task.current_stage === 0 ? <span className="text-slate-600">—</span> : task.current_stage === 5 ? <span className="flex items-center gap-2 text-xs text-slate-400"><UserRound size={18}/> Человек</span> : <span className="flex items-center gap-2 text-xs"><Avatar agent={task.current_agent}/><span>{task.current_agent?.name || '—'}</span></span>}</td>
         <td className="max-w-xs px-3 py-4">{task.dependencies.length ? <div className="flex flex-col gap-1">{task.dependencies.map(dep => <span key={dep.id} className={`flex items-center gap-1.5 text-[11px] ${dep.merged_to_main ? 'text-slate-500' : 'text-amber-300/70'}`}>{dep.merged_to_main ? <Check size={12}/> : <LockKeyhole size={11}/>} #{dep.id} {dep.title}</span>)}</div> : <span className="text-slate-700">—</span>}</td>
-        <td className="px-3"><div className="flex opacity-0 transition group-hover:opacity-100">{canStartPipeline(task) && <button className="icon-btn !text-emerald-400" title={task.status === 'needs_human' ? 'Продолжить' : 'Запустить пайплайн'} disabled={starting === task.id} onClick={() => start(task)}><Play size={16}/></button>}<button className="icon-btn" title="Редактировать" onClick={() => setEditing(task)}><ChevronRight size={17}/></button><button className="icon-btn !text-rose-400" title="Удалить задачу" onClick={() => remove(task)}><Trash2 size={16}/></button></div></td>
+        <td className="px-3"><div className="flex opacity-0 transition group-hover:opacity-100 focus-within:opacity-100">
+          {(canStartPipeline(task) || task.status === 'paused') && <button className="icon-btn !text-emerald-400" title={['needs_human', 'paused'].includes(task.status) ? 'Продолжить' : 'Запустить пайплайн'} disabled={pending === task.id} onClick={() => changeExecution(task, 'start')}><Play size={16}/></button>}
+          {canPausePipeline(task) && <button className="icon-btn !text-amber-400" title="Приостановить" disabled={pending === task.id} onClick={() => changeExecution(task, 'pause')}><Pause size={16}/></button>}
+          <button className="icon-btn" title="Редактировать" onClick={() => setEditing(task)}><ChevronRight size={17}/></button><button className="icon-btn !text-rose-400" title="Удалить задачу" onClick={() => remove(task)}><Trash2 size={16}/></button>
+        </div></td>
       </tr>)}</tbody></table></div>
       {!visible.length && <Empty icon={<ListTodo size={40}/>} title="Задач не найдено" text="Измените фильтр или создайте новую задачу"/>}
     </section>

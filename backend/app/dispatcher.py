@@ -3,6 +3,7 @@ import contextlib
 import json
 import re
 import shutil
+from collections.abc import Collection
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -51,9 +52,18 @@ def numbered_versions(directory: Path, pattern: str) -> list[Path]:
     return sorted(revisions, key=lambda path: int(VERSION_RE.search(path.name)[1]))
 
 
-def latest_version(directory: Path, pattern: str) -> Path | None:
-    revisions = numbered_versions(directory, pattern)
-    return revisions[-1] if revisions else None
+def paused_artifacts(task_id: int) -> set[str]:
+    with connect() as conn:
+        runs = conn.execute(
+            "SELECT stage, attempt FROM stage_runs WHERE task_id=? AND status='paused'", (task_id,),
+        ).fetchall()
+    names = {STAGE_FILES[run["stage"]].format(attempt=run["attempt"]) for run in runs}
+    names.update(f"01_questions_v{run['attempt']}.json" for run in runs if run["stage"] == 1)
+    return names
+
+
+def latest_version(directory: Path, pattern: str, *, exclude: Collection[str] = ()) -> Path | None:
+    return next((path for path in reversed(numbered_versions(directory, pattern)) if path.name not in exclude), None)
 
 
 def latest_document(task_id: int, directory: Path) -> Path | None:
@@ -177,6 +187,7 @@ class Dispatcher:
         self.active: dict[int, int] = {}
         self.pending: set[asyncio.Task[Any]] = set()
         self.runs: dict[int, asyncio.Task[Any]] = {}
+        self.checkouts: dict[int, asyncio.Task[tuple[Path, str, str]]] = {}
         self.processes: dict[int, asyncio.subprocess.Process] = {}
         self.stop_requested: set[int] = set()
         self.lock = asyncio.Lock()
@@ -189,8 +200,9 @@ class Dispatcher:
             )
             conn.execute("UPDATE tasks SET status='queued', updated_at=? WHERE status='running'", (now(),))
 
-    def spawn(self, coroutine: Any) -> None:
-        task = asyncio.create_task(coroutine)
+    def spawn(self, task_id: int, stage: int) -> None:
+        task = asyncio.create_task(self.run_stage(task_id, stage))
+        self.runs[task_id] = task
         self.pending.add(task)
         task.add_done_callback(self.pending.discard)
 
@@ -219,7 +231,7 @@ class Dispatcher:
                 if stage not in (1, 2, 3, 4):
                     continue
                 self.active[task["id"]] = agent_id
-                self.spawn(self.run_stage(task["id"], stage))
+                self.spawn(task["id"], stage)
 
     async def start(self, task_id: int) -> None:
         with connect() as conn:
@@ -231,7 +243,7 @@ class Dispatcher:
             await self.schedule()
         elif task_id not in self.active:
             self.active[task_id] = task["stage_agents"].get(str(task["current_stage"]), task["stage_agents"].get(task["current_stage"]))
-            self.spawn(self.run_stage(task_id, task["current_stage"]))
+            self.spawn(task_id, task["current_stage"])
 
     async def run_stage(self, task_id: int, stage: int) -> None:
         run_id: int | None = None
@@ -240,7 +252,7 @@ class Dispatcher:
             current_limits = limits()
             with transaction() as conn:
                 row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-                if not row:
+                if not row or row["status"] == "paused" or task_id in self.stop_requested:
                     return
                 task = decode_task(row)
                 budget = token_budget(task, current_limits)
@@ -424,11 +436,12 @@ class Dispatcher:
                 '{"has_questions": boolean, "questions": string[]}. Без вопросов укажи false и [].'
             )
         else:
+            excluded = paused_artifacts(task["id"])
             if stage == 2:
                 if not doc:
                     raise RuntimeError("Нет технического документа для ревью")
                 inputs.append(f"Документ: {doc}")
-                previous = latest_version(directory, "02_doc_review_v*.json")
+                previous = latest_version(directory, "02_doc_review_v*.json", exclude=excluded)
                 check = (
                     "Сверь алгоритм с дизайн-документом, ТЗ и согласованными ответами. "
                     "Для каждого обязательного сценария проследи путь от события через связи сущностей "
@@ -449,13 +462,13 @@ class Dispatcher:
                     "укажи фрагмент и что сохранить при сокращении. Выбор реализации оставь разработчику."
                 )
             else:
-                report = latest_version(directory, "03_impl_report_v*.md")
+                report = latest_version(directory, "03_impl_report_v*.md", exclude=excluded)
                 if not report:
                     raise RuntimeError("Нет отчёта реализации для ревью")
                 inputs.append(f"Отчёт реализации: {report}")
                 if doc:
                     inputs.append(f"Утверждённый техдокумент: {doc}")
-                previous = latest_version(directory, "04_code_review_v*.json")
+                previous = latest_version(directory, "04_code_review_v*.json", exclude=excluded)
                 check = (
                     "Сверь реализацию в checkout задачи с ТЗ, утверждённым техдоком и применимыми правилами проекта. "
                     "Отчёт исполнителя используй как указатель на изменения и выполненные проверки.\n"
@@ -504,7 +517,10 @@ class Dispatcher:
         if attempt <= 1:
             return ""
         with connect() as conn:
-            row = conn.execute("SELECT status, error FROM stage_runs WHERE task_id=? AND stage=? AND attempt=?", (task_id, stage, attempt - 1)).fetchone()
+            row = conn.execute(
+                "SELECT status, error FROM stage_runs WHERE task_id=? AND stage=? AND attempt<? AND status!='paused' "
+                "ORDER BY attempt DESC LIMIT 1", (task_id, stage, attempt),
+            ).fetchone()
         return (row["error"] or "")[:1500] if row and row["status"] == "error" else ""
 
     async def _run_server(self, task: dict[str, Any], agent: dict[str, Any], stage: int, attempt: int, run_id: int, directory: Path) -> None:
@@ -515,15 +531,36 @@ class Dispatcher:
                 file.write(text)
             await bus.publish(task["id"], stage, text)
 
+        def register_process(process: asyncio.subprocess.Process) -> None:
+            self.processes[task["id"]] = process
+            if task["id"] in self.stop_requested:
+                signal_cli(process)
+
         url = repository_url(task, integration_settings().get("repository_url", ""))
         await log("Читаю удаленный репозиторий задачи…\n" if url else "Агент запущен\n")
         checkout = None
         env = {"ORCHESTRATOR_TASK_ID": str(task["id"]), "ORCHESTRATOR_STAGE": str(stage)}
         if url and task["id"] not in self.stop_requested:
+            previous_checkout = self.checkouts.get(task["id"])
+            if previous_checkout:
+                # Cancelling the stage cannot interrupt Git running in the checkout thread.
+                with contextlib.suppress(Exception):
+                    await asyncio.shield(previous_checkout)
+            if task["id"] in self.stop_requested:
+                return
+            checkout_job = asyncio.create_task(asyncio.to_thread(
+                prepare_checkout, url, task["id"], task["branch_name"], task.get("external_issue_id") or "",
+            ))
+            self.checkouts[task["id"]] = checkout_job
+
+            def checkout_finished(job: asyncio.Task[tuple[Path, str, str]]) -> None:
+                self.checkouts.pop(task["id"], None)
+                if not job.cancelled():
+                    job.exception()
+
+            checkout_job.add_done_callback(checkout_finished)
             try:
-                checkout = await asyncio.to_thread(
-                    prepare_checkout, url, task["id"], task["branch_name"], task.get("external_issue_id") or ""
-                )
+                checkout = await asyncio.shield(checkout_job)
             except RepoError as exc:
                 await log(f"Репозиторий задачи недоступен: {exc}\n")
                 raise
@@ -577,7 +614,7 @@ class Dispatcher:
                     draft_questions.unlink(missing_ok=True)
                 if index:
                     await log(f"Fallback: {config['cli']} {config.get('model', '')}\n")
-                runner = ProcessRunner(log_callback=log, on_process=lambda process, task_id=task["id"]: self.processes.__setitem__(task_id, process))
+                runner = ProcessRunner(log_callback=log, on_process=register_process)
                 result = await runner.run(
                     config, prompt, directory, env, agent["fallback_triggers"].get("timeout_minutes", 20),
                 )
@@ -631,7 +668,7 @@ class Dispatcher:
     async def _run_worker(self, task: dict[str, Any], agent: dict[str, Any], attempt: int, run_id: int) -> None:
         directory = task_dir(task["id"])
         docs = latest_document(task["id"], directory)
-        reviews = latest_version(directory, "04_code_review_v*.json")
+        reviews = latest_version(directory, "04_code_review_v*.json", exclude=paused_artifacts(task["id"]))
         sent = await hub.send({
             "type": "ASSIGN_TASK",
             "task_id": task["id"],
@@ -645,7 +682,7 @@ class Dispatcher:
             "review_comments_content": reviews.read_text(encoding="utf-8") if reviews else "",
             "agent_config": {"primary": agent["primary_config"], "fallback": agent["fallback_configs"], "triggers": agent["fallback_triggers"], "role_prompt": agent["role_prompt"]},
         })
-        if not sent:
+        if not sent and task["id"] not in self.stop_requested:
             with connect() as conn:
                 conn.execute("UPDATE tasks SET status='waiting_worker', updated_at=? WHERE id=?", (now(), task["id"]))
                 conn.execute("UPDATE stage_runs SET status='queued', finished_at=? WHERE id=?", (now(), run_id))
@@ -793,6 +830,8 @@ class Dispatcher:
                 raise ValueError("Задача не найдена")
             task = decode_task(row)
             allowed_statuses = ("open", "stage_ready", "needs_human", "error")
+            if stage is None and not pipeline:
+                allowed_statuses += ("paused",)
             if stage is not None:
                 allowed_statuses += ("waiting_pr",)
             if (
@@ -808,18 +847,42 @@ class Dispatcher:
             next_stage = current_stage if stage is None else stage
             if not task["stage_agents"].get(next_stage):
                 raise ValueError(f"Назначьте бота на этап {next_stage}")
-            # A plain start on a human hold resumes the interrupted run mode.
-            single_stage = stage is not None or (not pipeline and task["status"] == "needs_human" and task["single_stage"])
+            # A plain start keeps the run mode for a paused task or a human hold.
+            single_stage = stage is not None or (not pipeline and task["status"] in ("needs_human", "paused") and task["single_stage"])
             conn.execute(
-                "UPDATE tasks SET status='queued', current_stage=?, single_stage=?, auto_retries=CASE WHEN status='needs_human' AND current_stage=? THEN auto_retries ELSE 0 END, hold_reason=NULL, updated_at=? WHERE id=?",
+                "UPDATE tasks SET status='queued', current_stage=?, single_stage=?, auto_retries=CASE WHEN status IN ('needs_human', 'paused') AND current_stage=? THEN auto_retries ELSE 0 END, hold_reason=NULL, updated_at=? WHERE id=?",
                 (next_stage, int(single_stage), next_stage, now(), task_id),
             )
         await self.start(task_id)
 
+    async def pause(self, task_id: int) -> None:
+        with transaction() as conn:
+            task = conn.execute("SELECT status, current_stage FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if not task or task["status"] not in ("queued", "waiting_worker", "running") or task_id in self.stop_requested:
+                raise ValueError("Задачу сейчас нельзя приостановить")
+            stage = task["current_stage"]
+            stopped = now()
+            conn.execute("UPDATE tasks SET status='paused', updated_at=? WHERE id=?", (stopped, task_id))
+            interrupted = conn.execute(
+                "UPDATE stage_runs SET status='paused', usage_partial=1, finished_at=? "
+                "WHERE task_id=? AND stage=? AND status='running'",
+                (stopped, task_id, stage),
+            ).rowcount
+        self.stop_requested.add(task_id)
+        try:
+            await self._stop_run(task_id)
+            if stage == 3 and interrupted:
+                await hub.send({"type": "CANCEL_TASK", "task_id": task_id})
+            await bus.publish(task_id, stage, "Пайплайн приостановлен.\n")
+        finally:
+            self.active.pop(task_id, None)
+            self.stop_requested.discard(task_id)
+            await self.schedule()
+
     async def restart(self, task_id: int, stage: int) -> None:
         with connect() as conn:
             task = conn.execute("SELECT status, current_stage FROM tasks WHERE id=?", (task_id,)).fetchone()
-        if not task or task["status"] in ("open", "blocked_main", "done") or stage > task["current_stage"]:
+        if not task or task["status"] in ("open", "blocked_main", "done", "paused") or stage > task["current_stage"]:
             raise ValueError("Сначала завершите предыдущие этапы")
         if task_id in self.stop_requested:
             raise ValueError("Перезапуск уже выполняется")
@@ -866,7 +929,7 @@ class Dispatcher:
             raise ValueError("Принудительно можно утвердить только этапы 1, 2 и 4")
         with connect() as conn:
             task = conn.execute("SELECT status, current_stage, single_stage FROM tasks WHERE id=?", (task_id,)).fetchone()
-            if not task or task["status"] in ("open", "blocked_main", "done") or stage != task["current_stage"]:
+            if not task or task["status"] in ("open", "blocked_main", "done", "paused") or stage != task["current_stage"]:
                 raise ValueError("Утвердить можно только текущий этап задач в работе")
             next_stage, status = {1: (2, "queued"), 2: (3, "queued"), 4: (5, "waiting_pr")}[stage]
             if status == "queued" and task["single_stage"]:

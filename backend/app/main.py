@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .config import ROOT, settings
 from .database import branch_name, connect, decode_agent, decode_task, dumps, init_db, now, token_summary, transaction
-from .dispatcher import dispatcher, limits, task_dir
+from .dispatcher import dispatcher, limits, paused_artifacts, task_dir
 from .events import bus
 from .schemas import AgentCreate, AgentUpdate, IntegrationSettings, ManualMerge, TaskCreate, TaskUpdate, TrackerAnswer
 from .tracker import BOT_PREFIX, YougileError, ensure_webhook, fetch_chat_message, fetch_import_tasks, integration_settings, test_connection
@@ -238,7 +238,8 @@ def delete_task(task_id: int) -> None:
 def artifacts(task_id: int) -> list[dict[str, Any]]:
     get_task(task_id)
     directory = task_dir(task_id)
-    files = [p for p in directory.iterdir() if p.is_file() and p.name != "00_task.md"]
+    excluded = paused_artifacts(task_id) | {"00_task.md"}
+    files = [p for p in directory.iterdir() if p.is_file() and p.name not in excluded]
     return [{"name": p.name, "path": str(p), "size": p.stat().st_size} for p in sorted(files)]
 
 
@@ -281,6 +282,16 @@ async def restart(task_id: int, stage: int) -> dict[str, bool]:
         raise HTTPException(400, "Некорректный этап")
     try:
         await dispatcher.restart(task_id, stage)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+    return {"ok": True}
+
+
+@app.post("/api/tasks/{task_id}/pause", status_code=202)
+async def pause_task(task_id: int) -> dict[str, bool]:
+    get_task(task_id)
+    try:
+        await dispatcher.pause(task_id)
     except ValueError as exc:
         raise HTTPException(409, str(exc))
     return {"ok": True}

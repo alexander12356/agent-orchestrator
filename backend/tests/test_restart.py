@@ -2,14 +2,18 @@ import os
 import signal
 import time
 
+import pytest
+
 from app.database import connect
 from app.dispatcher import dispatcher, task_dir
 from tests.conftest import make_task
 
 
-def test_restart_stops_the_running_agent_and_starts_another(client, agent):
+@pytest.mark.parametrize("action", ["restart", "pause"])
+def test_interrupt_stops_the_running_agent_and_allows_another_attempt(client, agent, action):
     command = (
         'python3 -c "from pathlib import Path; import time; '
+        "Path('01_tech_doc_v1.md').write_text('unfinished'); "
         "next(Path.cwd().glob('.orchestrator-progress-*/updates.txt')).write_text('started' + chr(10)); time.sleep(30)\""
     )
     updated = client.put(f"/api/agents/{agent['id']}", json={
@@ -28,12 +32,22 @@ def test_restart_stops_the_running_agent_and_starts_another(client, agent):
     else:
         raise AssertionError(log.read_text(encoding='utf-8') if log.exists() else 'живой лог агента не появился')
 
-    response = client.post(f"/api/tasks/{task['id']}/restart?stage=1")
+    task_path = f"/api/tasks/{task['id']}"
+    process = dispatcher.processes[task['id']]
+    response = client.post(f"{task_path}/restart?stage=1" if action == "restart" else f"{task_path}/pause")
     assert response.status_code == 202, response.text
+    assert process.returncode is not None
     with connect() as conn:
         rows = conn.execute('SELECT attempt, status, error FROM stage_runs WHERE task_id=? ORDER BY attempt', (task['id'],)).fetchall()
-    assert rows[0]['status'] == 'error'
-    assert rows[0]['error'] == 'Остановлено перезапуском'
+    if action == "restart":
+        assert rows[0]['status'] == 'error'
+        assert rows[0]['error'] == 'Остановлено перезапуском'
+    else:
+        assert len(rows) == 1
+        assert rows[0]['status'] == 'paused'
+        assert client.get(task_path).json()['status'] == 'paused'
+        assert '01_tech_doc_v1.md' not in {artifact['name'] for artifact in client.get(f'{task_path}/artifacts').json()}
+        assert client.post(f'{task_path}/start').status_code == 202
     second = task_dir(task['id']) / 'logs' / 'stage_1_attempt_2.log'
     for _ in range(50):
         if second.exists() and 'Агент запущен' in second.read_text(encoding='utf-8'):

@@ -165,6 +165,32 @@ def test_terminate_process_escalates_to_kill(tmp_path):
     assert process.returncode == -9
 
 
+def test_cancel_waits_for_worker_command_to_stop(tmp_path, monkeypatch):
+    worker = make_worker(tmp_path)
+
+    async def scenario():
+        launched = asyncio.Event()
+        start_process = worker.start_process
+        process = None
+
+        async def record_process(*args, **kwargs):
+            nonlocal process
+            process = await start_process(*args, **kwargs)
+            launched.set()
+            return process
+
+        monkeypatch.setattr(worker, "start_process", record_process)
+        job = asyncio.create_task(worker.execute([sys.executable, "-c", "import time; time.sleep(60)"]))
+        worker.jobs[1] = job
+        await asyncio.wait_for(launched.wait(), timeout=5)
+        await worker.cancel(1)
+
+        assert job.cancelled()
+        assert process is not None and process.returncode is not None
+
+    asyncio.run(scenario())
+
+
 def test_finish_consumer_cancels_a_stuck_reader(tmp_path):
     worker = make_worker(tmp_path)
 

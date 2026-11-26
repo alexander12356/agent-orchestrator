@@ -196,7 +196,6 @@ class UnityWorker:
         self.websocket: Any = None
         self.stopping = False
         self.jobs: dict[int, asyncio.Task[Any]] = {}
-        self.processes: dict[int, asyncio.subprocess.Process] = {}
 
     async def send(self, message: dict[str, Any]) -> None:
         if self.websocket:
@@ -207,10 +206,14 @@ class UnityWorker:
         await self.send({"type": "LOG_CHUNK", "task_id": task_id, "chunk": text, "format": "activity"})
 
     async def execute(self, command: list[str], cwd: Path | None = None) -> tuple[int, str]:
-        started = datetime.now(UTC)
-        process = await asyncio.create_subprocess_exec(*command, cwd=cwd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
-        assert process.stdout
-        output, _ = await process.communicate()
+        process = await self.start_process(command, cwd=cwd)
+        output_task = asyncio.create_task(process.communicate())
+        try:
+            output, _ = await asyncio.shield(output_task)
+        except asyncio.CancelledError:
+            await self.stop_process_tree(process)
+            await self.finish_consumer(output_task)
+            raise
         return process.returncode or 0, output.decode("utf-8", errors="replace")
 
     async def checked(self, command: list[str], cwd: Path | None = None) -> str:
@@ -322,6 +325,39 @@ class UnityWorker:
                 process.kill()
             await asyncio.wait_for(process.wait(), timeout)
 
+    async def start_process(self, command: list[str], **kwargs: Any) -> asyncio.subprocess.Process:
+        launch = asyncio.create_task(asyncio.create_subprocess_exec(
+            *command, **kwargs, stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+            start_new_session=os.name == "posix",
+        ))
+        try:
+            return await asyncio.shield(launch)
+        except asyncio.CancelledError:
+            with suppress(OSError):
+                process = await launch
+                await self.stop_process_tree(process)
+                await asyncio.wait_for(process.communicate(), timeout=5)
+            raise
+
+    async def stop_process_tree(self, process: asyncio.subprocess.Process) -> None:
+        if os.name == "posix":
+            with suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGTERM)
+            try:
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(process.wait(), timeout=2)
+            finally:
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+        elif process.returncode is None:
+            killer = await asyncio.create_subprocess_exec(
+                "taskkill", "/PID", str(process.pid), "/T", "/F",
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await killer.wait()
+        await self.terminate_process(process)
+
     async def finish_consumer(self, consumer: asyncio.Task[Any], timeout: float = 5) -> None:
         try:
             await asyncio.wait_for(asyncio.shield(consumer), timeout)
@@ -344,10 +380,8 @@ class UnityWorker:
             env.update(kimi_environment(config))
         if config.get("cli") == "zcode":
             env.update(zcode_environment())
-        process = await asyncio.create_subprocess_exec(
-            *command, cwd=path, env=env, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
-        )
-        self.processes[task_id] = process
+        started = datetime.now(UTC)
+        process = await self.start_process(command, cwd=path, env=env)
         lines: list[str] = []
         limited = False
 
@@ -382,11 +416,13 @@ class UnityWorker:
             except TimeoutError:
                 timed_out = True
                 await self.terminate_process(process)
+        except asyncio.CancelledError:
+            await self.stop_process_tree(process)
+            raise
         finally:
             if process.returncode is None:
                 await self.terminate_process(process)
             await self.finish_consumer(consumer)
-            self.processes.pop(task_id, None)
         output = "".join(lines)
         # A failed run is judged by the end of its output too: a text CLI may report the
         # limit on a line that does not look like an error report.
@@ -520,12 +556,10 @@ class UnityWorker:
             await self.send({"type": "TASK_FAILED", "task_id": task_id, "run_id": run_id, "error": str(exc)})
 
     async def cancel(self, task_id: int) -> None:
-        process = self.processes.pop(task_id, None)
-        if process and process.returncode is None:
-            await self.terminate_process(process)
-        job = self.jobs.pop(task_id, None)
+        job = self.jobs.get(task_id)
         if job and not job.done():
             job.cancel()
+            await asyncio.gather(job, return_exceptions=True)
 
     async def cleanup(self, message: dict[str, Any]) -> None:
         task_id = int(message["task_id"])
@@ -546,25 +580,30 @@ class UnityWorker:
         async with websockets.connect(self.server, additional_headers={"Authorization": f"Bearer {self.token}"}, ping_interval=20) as websocket:
             self.websocket = websocket
             heartbeat = asyncio.create_task(self.heartbeat())
-            running: set[asyncio.Task[Any]] = set()
+
+            def job_finished(job: asyncio.Task[Any], task_id: int) -> None:
+                if self.jobs.get(task_id) is job:
+                    self.jobs.pop(task_id)
+
             try:
                 async for raw in websocket:
                     message = json.loads(raw)
                     if message.get("type") == "ASSIGN_TASK":
                         task_id = int(message["task_id"])
+                        await self.cancel(task_id)
                         task = asyncio.create_task(self.assign(message))
                         self.jobs[task_id] = task
-                        running.add(task)
-                        task.add_done_callback(running.discard)
-                        task.add_done_callback(lambda _task, task_id=task_id: self.jobs.pop(task_id, None))
+                        task.add_done_callback(lambda job, task_id=task_id: job_finished(job, task_id))
                     elif message.get("type") == "CANCEL_TASK":
                         await self.cancel(int(message["task_id"]))
                     elif message.get("type") == "CLEANUP_WORKTREE":
                         await self.cleanup(message)
             finally:
                 heartbeat.cancel()
+                running = list(self.jobs.values())
                 for task in running:
                     task.cancel()
+                await asyncio.gather(heartbeat, *running, return_exceptions=True)
                 self.websocket = None
 
     async def run(self) -> None:

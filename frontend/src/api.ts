@@ -5,6 +5,9 @@ const base = '/api';
 export const canStartPipeline = (task: Task) =>
   !task.merged_to_main && ['open', 'stage_ready', 'needs_human', 'error'].includes(task.status);
 
+export const canPausePipeline = (task: Task) =>
+  ['queued', 'running', 'waiting_worker'].includes(task.status);
+
 export async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const response = await fetch(base + path, { ...options, headers: { 'Content-Type': 'application/json', ...options?.headers } });
   if (!response.ok) {

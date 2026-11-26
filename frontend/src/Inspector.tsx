@@ -1,9 +1,9 @@
 import TokenUsage from './TokenUsage';
-import { Check, ExternalLink, Flame, FolderGit2, Hand, Play, RotateCcw, Send, TerminalSquare } from 'lucide-react';
+import { Check, ExternalLink, Flame, FolderGit2, Hand, Pause, Play, RotateCcw, Send, TerminalSquare } from 'lucide-react';
 import { memo, useEffect, useRef, useState } from 'react';
 import TaskDescription from './TaskDescription';
 import Markdown from './Markdown';
-import { api, canStartPipeline, fmtTokens, spentTokens, stageName } from './api';
+import { api, canPausePipeline, canStartPipeline, fmtTokens, spentTokens, stageName } from './api';
 import { latestDocumentArtifact } from './graphUtils';
 import { Artifact, Task } from './types';
 
@@ -40,13 +40,14 @@ export default function Inspector({ task, stage, requestedArtifact: _requestedAr
     return () => source.close();
   }, [task.id, stage]);
   useEffect(() => { if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight; }, [logs]);
-  const action = async (kind: 'stage' | 'pipeline' | 'restart' | 'approve' | 'merge' | 'resume') => {
+  const action = async (kind: 'stage' | 'pipeline' | 'restart' | 'approve' | 'merge' | 'pause' | 'resume') => {
     const actions = {
       stage: [`start?stage=${stage}`, 'Этап поставлен в очередь'],
       pipeline: ['start?pipeline=true', 'Пайплайн поставлен в очередь'],
       restart: [`restart?stage=${stage}`, 'Запрошен перезапуск этапа'],
       approve: [`approve?stage=${stage}`, 'Этап утверждён'],
       merge: ['merge', 'Merge подтверждён'],
+      pause: ['pause', 'Пайплайн приостановлен'],
       resume: ['start', 'Задача продолжена'],
     };
     const [path, message] = actions[kind];
@@ -62,12 +63,14 @@ export default function Inspector({ task, stage, requestedArtifact: _requestedAr
   const nextStage = task.status === 'open' ? 1 : task.current_stage;
   const pipelineAvailable = canStartPipeline(task);
   const stageAvailable = pipelineAvailable || task.status === 'waiting_pr';
-  const canRestart = !task.merged_to_main && !['open', 'blocked_main', 'done'].includes(task.status) && stage <= task.current_stage;
+  const canRestart = !task.merged_to_main && !['open', 'blocked_main', 'done', 'paused'].includes(task.status) && stage <= task.current_stage;
   const stageUnavailableReason = stage > nextStage
     ? 'Сначала завершите предыдущие этапы'
     : !task.stage_agents[stage] ? 'Назначьте бота на этап' : undefined;
   return <div className="p-5">
     {pipelineAvailable && <button disabled={busy || !task.stage_agents[nextStage]} title={task.stage_agents[nextStage] ? undefined : `Назначьте бота на этап ${nextStage}`} className="btn btn-primary mb-3 w-full" onClick={() => action('pipeline')}><Play size={14}/>Запустить пайплайн</button>}
+    {canPausePipeline(task) && <button disabled={busy} title="При продолжении текущий этап запустится новой попыткой" className="btn mb-3 w-full" onClick={() => action('pause')}><Pause size={14}/>Приостановить</button>}
+    {task.status === 'paused' && <div className="mb-3 space-y-2"><p className="text-xs text-amber-300">На паузе · этап {task.current_stage}</p><button disabled={busy || !task.stage_agents[nextStage]} title={task.stage_agents[nextStage] ? undefined : `Назначьте бота на этап ${nextStage}`} className="btn btn-primary w-full" onClick={() => action('resume')}><Play size={14}/>Продолжить</button></div>}
     <div className="mb-5 flex border-b border-slate-800" role="tablist" aria-label="Инспектор задачи">{([['description', 'Описание'], ['stage', 'Этап'], ['document', 'Документ']] as [InspectorTab, string][]).map(([id, title]) => <button key={id} role="tab" aria-selected={tab === id} onClick={() => onTabChange(id)} className={`-mb-px border-b-2 px-3 py-2 text-xs transition ${tab === id ? 'border-indigo-400 text-indigo-300' : 'border-transparent text-slate-500 hover:text-slate-300'}`}>{title}</button>)}</div>
     {task.status === 'needs_human' && <section className="mb-5 rounded-lg border border-amber-700/60 bg-amber-950/30 p-3 text-xs"><div className="flex items-start gap-2 text-amber-200"><Hand size={15} className="mt-0.5 shrink-0"/><div><b>Нужно решение человека</b>{task.hold_reason && <p className="mt-1 text-amber-200/80">{task.hold_reason}</p>}</div></div><button disabled={busy} className="btn btn-primary mt-3 w-full" onClick={() => action('resume')}><Play size={14}/>Продолжить</button></section>}
     {tab === 'description' && <div><TaskDescription task={task}/><section><h3 className="mb-3 text-xs font-medium text-slate-300">Чат Yougile</h3>{chat ? <div className="markdown text-xs leading-5 text-slate-400"><Markdown text={chatContent}/></div> : <p className="text-[11px] text-slate-600">Чат не импортирован</p>}</section></div>}

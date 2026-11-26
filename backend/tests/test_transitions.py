@@ -83,3 +83,45 @@ def test_single_worker_stage_pauses_before_code_review(client, agent):
     asyncio.run(dispatcher.worker_completed({'task_id': task_id, 'run_id': run_id, 'report': 'Implemented'}))
     result = current(client, task_id)
     assert (result['current_stage'], result['status']) == (4, 'stage_ready')
+
+
+def test_pause_worker_ignores_late_result_and_resumes_same_stage(client, agent, monkeypatch):
+    from app.worker_hub import hub
+
+    messages = []
+
+    async def record_send(message):
+        messages.append(message)
+        return True
+
+    async def idle_start(task_id):
+        pass
+
+    monkeypatch.setattr(hub, "send", record_send)
+    monkeypatch.setattr(dispatcher, "start", idle_start)
+    task_id = make_task(client, agent)['id']
+    path = f'/api/tasks/{task_id}'
+    with connect() as conn:
+        conn.execute(
+            "UPDATE tasks SET current_stage=3, status='running', single_stage=1, auto_retries=2, code_returns=1 WHERE id=?",
+            (task_id,),
+        )
+        run_id = conn.execute(
+            "INSERT INTO stage_runs(task_id, stage, attempt, started_at) VALUES (?, 3, 1, CURRENT_TIMESTAMP)",
+            (task_id,),
+        ).lastrowid
+
+    assert client.post(f'{path}/pause').status_code == 202
+    assert messages == [{'type': 'CANCEL_TASK', 'task_id': task_id}]
+    asyncio.run(dispatcher.worker_completed({'task_id': task_id, 'run_id': run_id, 'report': 'Late result'}))
+    dispatcher.recover()
+    paused = current(client, task_id)
+    assert (paused['current_stage'], paused['status']) == (3, 'paused')
+    assert paused['runs'][0]['status'] == 'paused'
+    assert paused['runs'][0]['usage_partial']
+    assert client.post(f'{path}/start?pipeline=true').status_code == 409
+
+    assert client.post(f'{path}/start').status_code == 202
+    resumed = current(client, task_id)
+    assert (resumed['current_stage'], resumed['status']) == (3, 'queued')
+    assert (resumed['single_stage'], resumed['auto_retries'], resumed['code_returns']) == (1, 2, 1)

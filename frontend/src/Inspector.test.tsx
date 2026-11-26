@@ -65,9 +65,18 @@ describe('Inspector', () => {
     await waitFor(() => expect(api).toHaveBeenCalledWith('/tasks/7/start', expect.objectContaining({ method: 'POST' })));
   });
 
-  it('offers nothing to continue for a running task', () => {
-    render(<Inspector {...props} tab="description" />);
+  it('pauses a running task and resumes the same pipeline', async () => {
+    vi.clearAllMocks();
+    const { rerender } = render(<Inspector {...props} tab="stage" />);
     expect(screen.queryByRole('button', { name: 'Продолжить' })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Приостановить' }));
+    await waitFor(() => expect(api).toHaveBeenCalledWith('/tasks/7/pause', expect.objectContaining({ method: 'POST' })));
+
+    rerender(<Inspector {...props} task={{ ...task, status: 'paused' }} tab="stage" />);
+    expect(screen.queryByRole('button', { name: 'Перезапустить' })).not.toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Продолжить' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Продолжить' }));
+    await waitFor(() => expect(api).toHaveBeenCalledWith('/tasks/7/start', expect.objectContaining({ method: 'POST' })));
   });
 
   it('offers the pipeline and the selected eligible stage as separate actions', async () => {
