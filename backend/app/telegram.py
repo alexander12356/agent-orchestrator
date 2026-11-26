@@ -55,7 +55,7 @@ async def notify_decision(task_id: int, status: str) -> None:
 
     label = f"{task['external_issue_key']} · " if task["external_issue_key"] else ""
     lines = [
-        f"Agent Orchestrator · {label}задача #{task_id}, этап {task['current_stage']}",
+        f"Meku Agent Ops · {label}задача #{task_id}, этап {task['current_stage']}",
         task["title"][:500],
         ACTIONS[status],
     ]

@@ -12,7 +12,8 @@ from .database import connect
 
 
 BASE_URL = "https://yougile.com/api-v2"
-BOT_PREFIX = "[Agent Orchestrator]"
+BOT_PREFIX = "[Meku Agent Ops]"
+BOT_PREFIXES = (BOT_PREFIX, "[Agent Orchestrator]")
 logger = logging.getLogger(__name__)
 
 
@@ -198,7 +199,7 @@ async def find_reply(issue_id: str, question_id: int) -> str | None:
             and (message.get("properties") or {}).get("replyTo") == question_id
             and isinstance(text, str)
             and text.strip()
-            and not text.startswith(BOT_PREFIX)
+            and not text.startswith(BOT_PREFIXES)
         ):
             return text
     return None

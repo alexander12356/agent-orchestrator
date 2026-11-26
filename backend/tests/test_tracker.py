@@ -222,6 +222,10 @@ def test_yougile_webhook_accepts_only_reply_to_current_question(client, agent, m
 
     if delivery == 'reply':
         data['properties'] = {'replyTo': 200}
+        for prefix in (BOT_PREFIX, '[Agent Orchestrator]'):
+            bot_data = {**data, 'text': f'{prefix}\nQuestions'}
+            result = client.post(url, json={'event': 'chat_message-created', 'data': bot_data})
+            assert result.json() == {'accepted': False}
     elif delivery == 'message_id':
         data['id'] = 201
         FakeClient.requests = []
@@ -231,8 +235,9 @@ def test_yougile_webhook_accepts_only_reply_to_current_question(client, agent, m
         FakeClient.requests = []
         FakeClient.responses = [response(payload={'content': [
             {'id': 204, 'text': 'Later reply', 'properties': {'replyTo': 200}},
-            {'id': 202, 'text': 'Use fixed timestep', 'properties': {'replyTo': 200}},
-            {'id': 201, 'text': 'Reply to an older question', 'properties': {'replyTo': 100}},
+            {'id': 203, 'text': 'Use fixed timestep', 'properties': {'replyTo': 200}},
+            {'id': 201, 'text': '[Agent Orchestrator]\nQuestions', 'properties': {'replyTo': 200}},
+            {'id': 202, 'text': 'Reply to an older question', 'properties': {'replyTo': 100}},
         ]})]
 
     result = client.post(url, json={'event': 'chat_message-created', 'data': data})

@@ -1,4 +1,4 @@
-# Agent Orchestrator
+# Meku Agent Ops (MAO)
 
 Система полного цикла разработки Unity-фич: документация → ревью → реализация на локальном Unity Worker → ревью кода → Draft PR → merge в `main`. FastAPI хранит SQLite БД, артефакты и логи; локальный воркер подключается к серверу только исходящим WebSocket.
 

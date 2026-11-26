@@ -1,4 +1,4 @@
-import { Bot, CheckCircle2, LayoutList, Settings2, Share2, Wifi, WifiOff } from 'lucide-react';
+import { CheckCircle2, LayoutList, Settings2, Share2, Wifi, WifiOff } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { api } from './api';
 import Graph from './Graph';
@@ -28,7 +28,15 @@ export default function App() {
   const openTask = (id: number) => { setSelectedId(id); setTab('graph'); };
   return <div className="min-h-screen">
     <nav className="sticky top-0 z-40 flex h-[65px] items-center justify-between border-b border-slate-800 bg-[#0b1120e8] px-6 backdrop-blur-xl">
-      <div className="flex items-center gap-7"><div className="flex items-center gap-2 font-semibold tracking-tight"><span className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-500 shadow-lg shadow-indigo-950"><Bot size={19}/></span><span>Agent<span className="text-indigo-400">Flow</span></span></div><div className="flex gap-1">{[['tasks', 'Задачи', LayoutList], ['graph', 'Граф задачи', Share2], ['settings', 'Настройки', Settings2]].map(([id, title, Icon]) => <button key={id as string} disabled={id === 'graph' && !selected} onClick={() => setTab(id as typeof tab)} className={`flex items-center gap-2 rounded-lg px-3 py-2 text-xs transition ${tab === id ? 'bg-indigo-500/15 text-indigo-300' : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'}`}><Icon size={15}/>{title as string}</button>)}</div></div>
+      <div className="flex items-center gap-7">
+        <div className="flex items-center gap-2 font-semibold tracking-tight" title="Meku Agent Ops">
+          <span className="size-9 shrink-0 overflow-hidden rounded-lg bg-indigo-950">
+            <img src="/mao-mascot.png" alt="" width={36} height={36} className="size-full origin-[48%_17%] scale-[1.65]"/>
+          </span>
+          <span>MAO</span>
+        </div>
+        <div className="flex gap-1">{[['tasks', 'Задачи', LayoutList], ['graph', 'Граф задачи', Share2], ['settings', 'Настройки', Settings2]].map(([id, title, Icon]) => <button key={id as string} disabled={id === 'graph' && !selected} onClick={() => setTab(id as typeof tab)} className={`flex items-center gap-2 rounded-lg px-3 py-2 text-xs transition ${tab === id ? 'bg-indigo-500/15 text-indigo-300' : 'text-slate-500 hover:bg-slate-800 hover:text-slate-300'}`}><Icon size={15}/>{title as string}</button>)}</div>
+      </div>
       <div className={`flex items-center gap-2 text-[11px] ${online ? 'text-emerald-400' : 'text-slate-500'}`}><span className={`h-1.5 w-1.5 rounded-full ${online ? 'bg-emerald-400' : 'bg-slate-600'}`}/>{online ? <Wifi size={14}/> : <WifiOff size={14}/>}Unity Worker · {online ? 'Online' : 'Offline'}</div>
     </nav>
     <div hidden={tab !== 'tasks'}><Tasks tasks={tasks} agents={agents} reload={reload} openTask={openTask} onDeleted={id => { if (selectedId === id) { setSelectedId(null); setSelected(null); } reload(); }} notify={notify}/></div>
