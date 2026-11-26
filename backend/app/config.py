@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     tracker_webhook_secret: str = "change-me-tracker-secret"
     public_url: str = "http://localhost:8000"
     tracker_webhook_public_url: str = ""
+    telegram_credentials_file: Path | None = None
     auto_start: bool = True
 
     model_config = SettingsConfigDict(env_prefix="ORCHESTRATOR_", env_file=".env", extra="ignore")

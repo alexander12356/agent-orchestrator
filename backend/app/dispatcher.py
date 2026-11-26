@@ -14,6 +14,7 @@ from .events import bus
 from .repo import RepoError, prepare_checkout, repository_url
 from .runner import ProcessRunner, RunResult, signal_cli
 from .schemas import IntegrationSettings
+from .telegram import notify_decision
 from .tracker import find_reply, integration_settings, publish_questions
 from .worker_hub import hub
 
@@ -206,6 +207,12 @@ class Dispatcher:
         self.pending.add(task)
         task.add_done_callback(self.pending.discard)
 
+    def queue_decision_notification(self, task_id: int, status: str) -> None:
+        if settings.telegram_credentials_file:
+            notification = asyncio.create_task(notify_decision(task_id, status))
+            self.pending.add(notification)
+            notification.add_done_callback(self.pending.discard)
+
     async def schedule(self) -> None:
         if not settings.auto_start:
             return
@@ -309,8 +316,14 @@ class Dispatcher:
     async def _hold(self, task_id: int, stage: int, reason: str) -> None:
         """Stop a task until a person decides; «Продолжить», restart and approve release it."""
         with connect() as conn:
-            conn.execute("UPDATE tasks SET status='needs_human', hold_reason=?, updated_at=? WHERE id=?", (reason, now(), task_id))
+            changed = conn.execute(
+                "UPDATE tasks SET status='needs_human', hold_reason=?, updated_at=? WHERE id=? AND status!='needs_human'",
+                (reason, now(), task_id),
+            ).rowcount
+        if not changed:
+            return
         await bus.publish(task_id, stage, f"Нужно решение человека: {reason}\n")
+        self.queue_decision_notification(task_id, "needs_human")
 
     async def _fail(self, task_id: int, stage: int, run_id: int, exc: Exception) -> None:
         message = str(exc)
@@ -345,6 +358,7 @@ class Dispatcher:
             await bus.publish(task_id, stage, f"Этап {stage} не завершён: {summary}\nАвтоповтор {retried} из {current_limits['max_auto_retries']}.\n")
         else:
             await bus.publish(task_id, stage, f"Ошибка: {summary}\n")
+            self.queue_decision_notification(task_id, "error")
 
     def _prompt(self, task: dict[str, Any], agent: dict[str, Any], stage: int, attempt: int, *,
                 checkout: tuple[Path, str, str] | None = None, previous_error: str = "",
@@ -759,13 +773,18 @@ class Dispatcher:
                 )
         if hold:
             await self._hold(task_id, hold_stage, hold)
-        if issue_id:
-            message_id = await publish_questions(issue_id, questions["questions"])
-            with connect() as conn:
-                conn.execute(
-                    "UPDATE stage_runs SET yougile_question_message_id=? WHERE task_id=? AND stage=1 AND attempt=?",
-                    (message_id, task_id, attempt),
-                )
+            return
+        try:
+            if issue_id:
+                message_id = await publish_questions(issue_id, questions["questions"])
+                with connect() as conn:
+                    conn.execute(
+                        "UPDATE stage_runs SET yougile_question_message_id=? WHERE task_id=? AND stage=1 AND attempt=?",
+                        (message_id, task_id, attempt),
+                    )
+        finally:
+            if (status, next_stage) != (task["status"], task["current_stage"]):
+                self.queue_decision_notification(task_id, status)
 
     async def worker_completed(self, message: dict[str, Any]) -> None:
         task_id = int(message["task_id"])
@@ -784,12 +803,14 @@ class Dispatcher:
                 "UPDATE stage_runs SET artifact_path=?, cli_used=?, model_used=?, is_fallback=?, input_tokens=?, output_tokens=?, cache_tokens=?, tokens_estimated=?, usage_partial=?, status='completed', finished_at=? WHERE id=?",
                 (str(artifact), message.get("cli_used"), message.get("model_used", ""), int(message.get("is_fallback", False)), int(message.get("input_tokens", 0)), int(message.get("output_tokens", 0)), int(message.get("cache_tokens", 0)), int(message.get("tokens_estimated", message.get("estimated", False))), int(message.get("usage_partial", message.get("is_fallback", False)) or "input_tokens" not in message), now(), run_id),
             )
-            conn.execute(
-                "UPDATE tasks SET pr_url=COALESCE(?, pr_url), worktree_path=?, current_stage=4, status=CASE WHEN single_stage THEN 'stage_ready' ELSE 'queued' END, auto_retries=0, hold_reason=NULL, updated_at=? WHERE id=?",
+            task = conn.execute(
+                "UPDATE tasks SET pr_url=COALESCE(?, pr_url), worktree_path=?, current_stage=4, status=CASE WHEN single_stage THEN 'stage_ready' ELSE 'queued' END, auto_retries=0, hold_reason=NULL, updated_at=? WHERE id=? RETURNING status",
                 (message.get("pr_url"), message.get("worktree_path"), now(), task_id),
-            )
+            ).fetchone()
             self.active.pop(task_id, None)
         await self.schedule()
+        if task:
+            self.queue_decision_notification(task_id, task["status"])
 
     async def worker_failed(self, message: dict[str, Any]) -> None:
         task_id, run_id = int(message["task_id"]), int(message["run_id"])
@@ -803,6 +824,7 @@ class Dispatcher:
         self.active.pop(task_id, None)
         summary = error.partition("\n")[0] or "Worker failed"
         await bus.publish(task_id, 3, f"Ошибка: {summary}\n")
+        self.queue_decision_notification(task_id, "error")
 
     async def reconcile_yougile_answers(self, issue_id: str | None) -> list[int]:
         with connect() as conn:
@@ -961,6 +983,7 @@ class Dispatcher:
                 (next_stage, status, 0 if stage in (1, 2) else None, 0 if stage == 4 else None, now(), task_id),
             )
         await self.start(task_id)
+        self.queue_decision_notification(task_id, status)
 
     async def merged(self, task_id: int, pr_url: str | None = None, *, cleanup_worktree: bool = True) -> None:
         with transaction() as conn:
