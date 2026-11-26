@@ -1,4 +1,5 @@
 import asyncio
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -70,7 +71,8 @@ def test_checkout_uses_remote_branch_matching_external_task(tmp_path, monkeypatc
     assert (checkout / "FEATURE.md").read_text(encoding="utf-8") == "card"
 
 
-def test_server_agent_receives_full_checkout_and_separate_artifact_dir(client, agent, tmp_path, monkeypatch):
+@pytest.mark.parametrize("with_unity", [False, True])
+def test_server_agent_receives_full_checkout_and_separate_artifact_dir(client, agent, tmp_path, monkeypatch, with_unity):
     async def start_manually(task_id):
         pass
 
@@ -78,8 +80,17 @@ def test_server_agent_receives_full_checkout_and_separate_artifact_dir(client, a
     origin = tmp_path / "origin"
     origin.mkdir()
     git(origin, "init", "-b", "main")
-    commit(origin, "Assets/Windows/IWindowSystem.cs", "public interface IWindowSystem {}")
+    project = "Game/" if with_unity else ""
+    commit(origin, project + "Assets/Windows/IWindowSystem.cs", "public interface IWindowSystem {}")
+    if with_unity:
+        commit(origin, "Game/Packages/manifest.json", "{}")
+        commit(origin, "Game/ProjectSettings/ProjectVersion.txt", "m_EditorVersion: 6000.0.0f1")
     commit(origin, "Assets/Data/Catalog.asset", "Capacity: 2")
+    which = shutil.which
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/local/bin/unity-cli" if name == "unity-cli" else which(name))
+    if with_unity:
+        config = {**agent["primary_config"], "command": "python backup.py"}
+        assert client.put(f"/api/agents/{agent['id']}", json={**agent, "fallback_configs": [config]}).status_code == 200
     assert client.put("/api/settings", json={"repository_url": origin.as_uri()}).status_code == 200
     task = make_task(client, agent)
     seen = []
@@ -92,8 +103,21 @@ def test_server_agent_receives_full_checkout_and_separate_artifact_dir(client, a
             checkout = Path(env["ORCHESTRATOR_REPO"])
             assert checkout != cwd
             assert str(checkout) in prompt
-            assert (checkout / "Assets/Windows/IWindowSystem.cs").is_file()
+            assert (checkout / project / "Assets/Windows/IWindowSystem.cs").is_file()
             assert (checkout / "Assets/Data/Catalog.asset").read_text(encoding="utf-8") == "Capacity: 2"
+            assert "grep -l -F" in prompt
+            if with_unity:
+                index_root = Path(env["UNITY_PROJECT_ROOT"])
+                assert not index_root.resolve().is_relative_to(checkout.resolve())
+                assert (index_root / "Assets").resolve() == (checkout / "Game/Assets").resolve()
+                assert env["UNITY_CLI_LSP_MODE"] == "off"
+                assert "tool call find_symbol" in prompt
+                seen.append(index_root)
+                if config["command"] != "python backup.py":
+                    return RunResult(1, "primary failed")
+            else:
+                assert "UNITY_PROJECT_ROOT" not in env
+                assert "tool call find_symbol" not in prompt
             assert (cwd / "00_task.md").is_file()
             (cwd / "01_tech_doc_v1.md").write_text("# Doc", encoding="utf-8")
             seen.append(checkout)
@@ -104,7 +128,10 @@ def test_server_agent_receives_full_checkout_and_separate_artifact_dir(client, a
 
     result = client.get(f"/api/tasks/{task['id']}").json()
     assert result["runs"][0]["status"] == "completed", result["runs"][0]["error"]
-    assert len(seen) == 1
+    assert len(seen) == (3 if with_unity else 1)
+    if with_unity:
+        assert seen[0] == seen[1]
+        assert not seen[0].exists()
 
 
 def test_missing_remote_branches_raise(tmp_path, monkeypatch):

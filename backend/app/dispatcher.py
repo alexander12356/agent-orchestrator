@@ -11,7 +11,7 @@ from typing import Any
 from .config import settings
 from .database import connect, decode_agent, decode_task, now, spent_tokens, transaction
 from .events import bus
-from .repo import RepoError, prepare_checkout, repository_url
+from .repo import UNITY_PROJECT_DIRS, RepoError, prepare_checkout, repository_url, unity_project_root
 from .runner import ProcessRunner, RunResult, signal_cli
 from .schemas import IntegrationSettings
 from .telegram import notify_decision
@@ -24,6 +24,15 @@ STAGE_FILES = {
     2: "02_doc_review_v{attempt}.json",
     3: "03_impl_report_v{attempt}.md",
     4: "04_code_review_v{attempt}.json",
+}
+
+CHECKOUT_GUIDANCE = {
+    1: "Перед описанием существующей связи проверь её участников в checkout. Для привязки через сцену, "
+       "префаб или граф открой соответствующий ассет. В техдоке сохрани требуемый уровень детализации.",
+    2: "Если замечание зависит от текущего устройства проекта, проверь исходник или ассет. "
+       "Укажи затронутый сценарий и основание вывода. При повторном ревью начни с прошлых блокеров и изменённых мест.",
+    4: "Начни с изменённых файлов и обязательных сценариев. Для изменённого контракта проверь вызывающий код, "
+       "для изменённого Unity-компонента — затронутые сериализованные ссылки. Проверки в Editor сверяй с отчётом Worker.",
 }
 VERDICT_CONTRACT = '{"status": "APPROVED"|"REJECTED", "summary": string, "comments": string[], "notes": string[]}'
 VERSION_RE = re.compile(r"_v(\d+)\.")
@@ -362,7 +371,8 @@ class Dispatcher:
 
     def _prompt(self, task: dict[str, Any], agent: dict[str, Any], stage: int, attempt: int, *,
                 checkout: tuple[Path, str, str] | None = None, previous_error: str = "",
-                doc: Path | None = None, review: dict[str, Any] | None = None, draft: Path | None = None) -> str:
+                doc: Path | None = None, review: dict[str, Any] | None = None, draft: Path | None = None,
+                unity_root: Path | None = None) -> str:
         directory = task_dir(task["id"])
         artifact = directory / STAGE_FILES[stage].format(attempt=attempt)
         inputs = [f"ТЗ: {directory / '00_task.md'}"]
@@ -381,6 +391,29 @@ class Dispatcher:
                     "Проверяй контракты по файлам выбранного коммита перед тем, как задавать вопросы о недостающих сведениях."
                 )
             )
+            if stage in CHECKOUT_GUIDANCE:
+                inputs.append(
+                    "Для точечного поиска используй rg с ограничением по расширению или каталогу, "
+                    "например rg -n -g '*.cs' 'ИмяСимвола' <путь-checkout>. "
+                    "Если rg недоступен, выполни git -C <путь-checkout> grep -n 'ИмяСимвола' -- '*.cs'.\n"
+                    "Для поиска привязки Unity-компонента прочитай GUID из .cs.meta, затем найди пути командой "
+                    "git -C <путь-checkout> grep -l -F '<GUID>' -- '*.prefab' '*.unity' '*.asset'. "
+                    "Открой нужный фрагмент и проверь объект и поле ссылки.\n"
+                    + CHECKOUT_GUIDANCE[stage]
+                )
+                if unity_root is not None:
+                    inputs.append(
+                        f"Корень Unity-проекта в checkout: {unity_root}. "
+                        "Для навигации по C# доступен akiojin/unity-cli в локальном режиме. "
+                        "UNITY_PROJECT_ROOT указывает на временный каталог для индекса со ссылками на исходники. "
+                        "Пути из вывода читай относительно корня проекта в checkout.\n"
+                        "Перед первым поиском символов в попытке выполни "
+                        "unity-cli tool call build_index --json '{}' --output json.\n"
+                        "unity-cli tool call find_symbol --json '{\"name\":\"ИмяКласса\",\"exact\":true}' --output json\n"
+                        "unity-cli tool call find_refs --json '{\"name\":\"ИмяМетода\",\"pageSize\":10}' --output json\n"
+                        "Проверь найденные места по исходникам: локальный индекс может вернуть одноимённые символы. "
+                        "При ошибке продолжи через rg или git grep. Для проверки, требующей Editor, укажи действие для Unity Worker."
+                    )
         inputs.append(
             "Используй указанные артефакты. Отметь недостающие сведения. "
             "Не открывай GitHub, другие каталоги сервера, чужие задачи и базу."
@@ -626,6 +659,19 @@ class Dispatcher:
 
         configs = [agent["primary_config"], *agent["fallback_configs"]]
         with contextlib.ExitStack() as stack:
+            unity_root = None
+            if checkout and stage in CHECKOUT_GUIDANCE and shutil.which("unity-cli"):
+                try:
+                    unity_root = await asyncio.to_thread(unity_project_root, checkout[0])
+                    if unity_root is not None:
+                        index_root = Path(stack.enter_context(TemporaryDirectory(prefix="unity-cli-")))
+                        for name in UNITY_PROJECT_DIRS:
+                            (index_root / name).symlink_to((unity_root / name).resolve(), target_is_directory=True)
+                        env.update(UNITY_PROJECT_ROOT=str(index_root), UNITY_CLI_LSP_MODE="off",
+                                   UNITY_CLI_NO_AUTO_UPDATE="1")
+                except (RepoError, OSError) as exc:
+                    unity_root = None
+                    await log(f"Локальный индекс Unity CLI недоступен: {exc}\n")
             draft = None
             if revise:
                 scratch = Path(stack.enter_context(TemporaryDirectory(prefix="tech-doc-", dir=directory / "logs")))
@@ -633,7 +679,7 @@ class Dispatcher:
                 draft_questions = scratch / f"01_questions_v{attempt}.json"
             prompt = self._prompt(
                 task, agent, stage, attempt, checkout=checkout, previous_error=previous_error,
-                doc=doc, review=review, draft=draft,
+                doc=doc, review=review, draft=draft, unity_root=unity_root,
             )
             for index, config in enumerate(configs):
                 if task["id"] in self.stop_requested:

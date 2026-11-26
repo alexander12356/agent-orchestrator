@@ -35,6 +35,17 @@ Vite доступен на `http://localhost:5173` и проксирует API �
 
 ## Управление запуском в WSL2 (Windows)
 
+Для поиска по checkout на этапах 1, 2 и 4 установите инструменты из Windows:
+
+```powershell
+wsl -d Ubuntu-24.04 -u root -- bash /root/projects/agent-orchestrator/scripts/install-repo-tools.sh
+```
+
+Скрипт устанавливает `ripgrep` и проверенный по SHA-256 бинарник `akiojin/unity-cli` 0.19.0.
+Оркестратор включает локальный C#-поиск при наличии CLI и однозначно определённого корня Unity.
+Индекс хранится во временном каталоге этапа, а исходники читаются из checkout задачи.
+Для проверки сериализованных ссылок используйте поиск GUID по файлам проекта.
+
 `scripts/orchestrator.bat` управляет сервером в копии репозитория `/root/projects/agent-orchestrator` внутри Ubuntu WSL2. Процесс стартует через `setsid nohup uvicorn` и переживает закрытие окна:
 
 ```bat

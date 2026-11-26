@@ -14,6 +14,18 @@ def repository_url(task: dict, configured: str = "") -> str:
     return str(task.get("repository_url") or configured or "").strip()
 
 
+UNITY_PROJECT_DIRS = ("Assets", "Packages", "ProjectSettings")
+
+
+def unity_project_root(checkout: Path) -> Path | None:
+    if all((checkout / name).is_dir() for name in UNITY_PROJECT_DIRS):
+        return checkout
+    files = _git(["ls-files", "-z", "--", ":(glob)**/ProjectSettings/ProjectVersion.txt"], checkout)
+    roots = {checkout / Path(file).parent.parent for file in files.split("\0") if file}
+    projects = [root for root in roots if all((root / name).is_dir() for name in UNITY_PROJECT_DIRS)]
+    return projects[0] if len(projects) == 1 else None
+
+
 def prepare_checkout(url: str, task_id: int, branch: str, external_id: str = "") -> tuple[Path, str, str]:
     ref = _select_branch(url, branch, external_id)
     mirror = _ensure_mirror(url)
