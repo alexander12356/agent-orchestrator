@@ -5,6 +5,15 @@ from app.config import settings
 from app.main import app
 
 
+@pytest.fixture(autouse=True)
+def disable_live_telegram(monkeypatch):
+    def unexpected_request(*args, **kwargs):
+        pytest.fail("Telegram requests in tests must use a local stub")
+
+    monkeypatch.setattr(settings, "telegram_credentials_file", None)
+    monkeypatch.setattr("app.telegram.urlopen", unexpected_request)
+
+
 @pytest.fixture()
 def client(tmp_path):
     settings.storage_dir = tmp_path / "storage"

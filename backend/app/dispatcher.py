@@ -803,14 +803,12 @@ class Dispatcher:
                 "UPDATE stage_runs SET artifact_path=?, cli_used=?, model_used=?, is_fallback=?, input_tokens=?, output_tokens=?, cache_tokens=?, tokens_estimated=?, usage_partial=?, status='completed', finished_at=? WHERE id=?",
                 (str(artifact), message.get("cli_used"), message.get("model_used", ""), int(message.get("is_fallback", False)), int(message.get("input_tokens", 0)), int(message.get("output_tokens", 0)), int(message.get("cache_tokens", 0)), int(message.get("tokens_estimated", message.get("estimated", False))), int(message.get("usage_partial", message.get("is_fallback", False)) or "input_tokens" not in message), now(), run_id),
             )
-            task = conn.execute(
-                "UPDATE tasks SET pr_url=COALESCE(?, pr_url), worktree_path=?, current_stage=4, status=CASE WHEN single_stage THEN 'stage_ready' ELSE 'queued' END, auto_retries=0, hold_reason=NULL, updated_at=? WHERE id=? RETURNING status",
+            conn.execute(
+                "UPDATE tasks SET pr_url=COALESCE(?, pr_url), worktree_path=?, current_stage=4, status=CASE WHEN single_stage THEN 'stage_ready' ELSE 'queued' END, auto_retries=0, hold_reason=NULL, updated_at=? WHERE id=?",
                 (message.get("pr_url"), message.get("worktree_path"), now(), task_id),
-            ).fetchone()
+            )
             self.active.pop(task_id, None)
         await self.schedule()
-        if task:
-            self.queue_decision_notification(task_id, task["status"])
 
     async def worker_failed(self, message: dict[str, Any]) -> None:
         task_id, run_id = int(message["task_id"]), int(message["run_id"])
