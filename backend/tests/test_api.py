@@ -49,6 +49,23 @@ def test_worker_reports_model_and_prompt_while_stage_is_running(client):
     assert run['sent_prompt'] == 'Точный текст\nпромпта'
 
 
+def test_task_project_can_be_set_preserved_by_older_clients_and_cleared(client):
+    payload = {'title': 'Task', 'project': '  Unity  ', 'milestone': 'Prototype', 'sprint': 'Sprint 1'}
+    response = client.post('/api/tasks', json=payload)
+    assert response.status_code == 201
+    assert response.json()['project'] == 'Unity'
+    url = f"/api/tasks/{response.json()['id']}"
+
+    del payload['project']
+    response = client.put(url, json=payload)
+    assert response.status_code == 200
+    assert response.json()['project'] == 'Unity'
+
+    response = client.put(url, json={**payload, 'project': ''})
+    assert response.status_code == 200
+    assert client.get(url).json()['project'] == ''
+
+
 def test_task_without_agent_assignment_does_not_get_default_agent(client, agent):
     response = client.post('/api/tasks', json={'title': 'Unassigned', 'description': 'Description', 'stage_agents': {}})
 

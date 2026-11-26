@@ -3,6 +3,7 @@ import { Check, ChevronRight, ListTodo, LockKeyhole, Pause, Play, Plus, Search, 
 import { FormEvent, useMemo, useState } from 'react';
 import { api, canPausePipeline, canStartPipeline } from './api';
 import { Avatar, Empty, Modal, StageBadge } from './components';
+import TaskHierarchy, { availableTaskPath, buildTaskHierarchy, taskPath, taskPathLabel } from './TaskHierarchy';
 import { Agent, Task } from './types';
 
 const filters = [['all', 'Все'], ['open', 'Open'], ['active', 'В работе'], ['waiting', 'Ожидают'], ['pr', 'Готово к PR'], ['done', 'Завершены']];
@@ -10,12 +11,17 @@ const filters = [['all', 'Все'], ['open', 'Open'], ['active', 'В работ�
 export default function Tasks({ tasks, agents, reload, openTask, onDeleted, notify }: { tasks: Task[]; agents: Agent[]; reload: () => void; openTask: (id: number) => void; onDeleted: (id: number) => void; notify: (message: string) => void }) {
   const [filter, setFilter] = useState('all');
   const [search, setSearch] = useState('');
+  const [selectedPath, setSelectedPath] = useState<string[]>([]);
   const [editing, setEditing] = useState<Task | 'new' | null>(null);
   const [pending, setPending] = useState<number | null>(null);
+  const hierarchy = useMemo(() => buildTaskHierarchy(tasks), [tasks]);
+  const activePath = useMemo(() => availableTaskPath(hierarchy, selectedPath), [hierarchy, selectedPath]);
   const visible = useMemo(() => tasks.filter(task => {
     const byFilter = filter === 'all' || (filter === 'open' && task.status === 'open') || (filter === 'active' && canPausePipeline(task)) || (filter === 'waiting' && ['blocked_main', 'waiting_answer', 'stage_ready', 'needs_human', 'error', 'paused'].includes(task.status)) || (filter === 'pr' && task.current_stage === 5) || (filter === 'done' && task.current_stage === 6);
-    return byFilter && `${task.id} ${task.title} ${task.description} ${task.external_issue_key || ''} ${task.milestone || ''} ${task.sprint || ''}`.toLowerCase().includes(search.toLowerCase());
-  }), [tasks, filter, search]);
+    const path = taskPath(task);
+    return byFilter && activePath.every((value, index) => path[index] === value)
+      && `${task.id} ${task.title} ${task.description} ${task.external_issue_key || ''} ${path.join(' ')}`.toLowerCase().includes(search.toLowerCase());
+  }), [tasks, filter, search, activePath]);
   const remove = async (task: Task) => {
     if (!window.confirm(`Удалить задачу #${task.id} «${task.title}»? Это действие нельзя отменить.`)) return;
     try {
@@ -36,7 +42,10 @@ export default function Tasks({ tasks, agents, reload, openTask, onDeleted, noti
   };
   return <main className="mx-auto max-w-[1500px] p-7">
     <div className="mb-6 flex flex-wrap items-center justify-between gap-4"><div><h1 className="text-2xl font-semibold tracking-tight">Задачи</h1><p className="mt-1 text-sm text-slate-500">Управление полным циклом разработки</p></div><button className="btn btn-primary" onClick={() => setEditing('new')}><Plus size={16}/> Новая задача</button></div>
-    <section className="card overflow-hidden">
+    <div className="grid items-start gap-4 lg:grid-cols-[14rem_minmax(0,1fr)]">
+    <TaskHierarchy root={hierarchy} selected={activePath} onSelect={setSelectedPath}/>
+    <section className="card min-w-0 overflow-hidden" aria-label="Список задач">
+      <div className="break-words border-b border-slate-800 px-4 py-3 text-sm text-slate-300">{taskPathLabel(activePath)}</div>
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 p-4">
         <div className="flex flex-wrap gap-1">{filters.map(([id, title]) => <button key={id} onClick={() => setFilter(id)} className={`rounded-lg px-3 py-2 text-xs transition ${filter === id ? 'bg-indigo-500/15 text-indigo-300' : 'text-slate-500 hover:bg-slate-800'}`}>{title}</button>)}</div>
         <div className="relative w-full sm:w-64"><Search size={15} className="absolute left-3 top-3 text-slate-600"/><input className="!py-2 !pl-9" placeholder="Поиск задач..." value={search} onChange={e => setSearch(e.target.value)}/></div>
@@ -48,7 +57,7 @@ export default function Tasks({ tasks, agents, reload, openTask, onDeleted, noti
           <button onClick={() => openTask(task.id)} className="text-left text-sm font-medium text-slate-200 hover:text-indigo-300">{task.title}</button>
           <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px]">
             {task.external_issue_id && (task.external_issue_url ? <a className="text-indigo-400 hover:text-indigo-300" href={task.external_issue_url} target="_blank" rel="noreferrer">{task.external_issue_key || task.external_issue_id} ↗</a> : <span className="text-slate-600">{task.external_issue_key || task.external_issue_id}</span>)}
-            {(task.milestone || task.sprint) && <span className="flex items-center gap-1 rounded bg-slate-800/70 px-2 py-0.5 text-slate-400">{task.milestone && <span>{task.milestone}</span>}{task.milestone && task.sprint && <ChevronRight size={11}/>} {task.sprint && <span>{task.sprint}</span>}</span>}
+            {(task.project || task.milestone || task.sprint) && <span className="flex flex-wrap items-center gap-1 rounded bg-slate-800/70 px-2 py-0.5 text-slate-400">{taskPath(task).filter(Boolean).map((label, index) => <span key={index} className="flex items-center gap-1">{index > 0 && <ChevronRight size={11} aria-hidden="true"/>}{label}</span>)}</span>}
             <TokenUsage usage={task}/>
           </div>
         </td>
@@ -63,16 +72,19 @@ export default function Tasks({ tasks, agents, reload, openTask, onDeleted, noti
       </tr>)}</tbody></table></div>
       {!visible.length && <Empty icon={<ListTodo size={40}/>} title="Задач не найдено" text="Измените фильтр или создайте новую задачу"/>}
     </section>
-    {editing && <TaskModal task={editing === 'new' ? null : editing} tasks={tasks} agents={agents} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); reload(); notify(editing === 'new' ? 'Задача создана' : 'Задача обновлена'); }}/>} 
+    </div>
+    {editing && <TaskModal task={editing === 'new' ? null : editing} selectedPath={activePath} tasks={tasks} agents={agents} onClose={() => setEditing(null)} onSaved={() => { setEditing(null); reload(); notify(editing === 'new' ? 'Задача создана' : 'Задача обновлена'); }}/>}
   </main>;
 }
 
-function TaskModal({ task, tasks, agents, onClose, onSaved }: { task: Task | null; tasks: Task[]; agents: Agent[]; onClose: () => void; onSaved: () => void }) {
+function TaskModal({ task, selectedPath, tasks, agents, onClose, onSaved }: { task: Task | null; selectedPath: string[]; tasks: Task[]; agents: Agent[]; onClose: () => void; onSaved: () => void }) {
   const [title, setTitle] = useState(task?.title || '');
   const [description, setDescription] = useState(task?.description || '');
   const [external, setExternal] = useState(task?.external_issue_id || '');
-  const [milestone, setMilestone] = useState(task?.milestone || '');
-  const [sprint, setSprint] = useState(task?.sprint || '');
+  const path = task ? taskPath(task) : selectedPath;
+  const [project, setProject] = useState(path[0] || '');
+  const [milestone, setMilestone] = useState(path[1] || '');
+  const [sprint, setSprint] = useState(path[2] || '');
   const [repository, setRepository] = useState(task?.repository_url || '');
   const [budget, setBudget] = useState(task?.token_budget == null ? '' : String(task.token_budget));
   const [deps, setDeps] = useState<number[]>(task?.dependencies.map(d => d.id) || []);
@@ -82,7 +94,7 @@ function TaskModal({ task, tasks, agents, onClose, onSaved }: { task: Task | nul
   const submit = async (e: FormEvent) => {
     e.preventDefault(); setBusy(true); setError('');
     try {
-      const body = JSON.stringify({ title, description, external_issue_id: external || null, milestone, sprint, repository_url: repository, token_budget: budget === '' ? null : Number(budget), dependencies: deps, stage_agents: assigned });
+      const body = JSON.stringify({ title, description, external_issue_id: external || null, project, milestone, sprint, repository_url: repository, token_budget: budget === '' ? null : Number(budget), dependencies: deps, stage_agents: assigned });
       await api(task ? `/tasks/${task.id}` : '/tasks', { method: task ? 'PUT' : 'POST', body }); onSaved();
     } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   };
@@ -94,7 +106,7 @@ function TaskModal({ task, tasks, agents, onClose, onSaved }: { task: Task | nul
   return <Modal title={task ? `Редактировать задачу #${task.id}` : 'Новая задача'} onClose={onClose} wide><form onSubmit={submit} className="grid gap-5">
     <div className="grid gap-4 sm:grid-cols-2"><label>Название<input required autoFocus value={title} onChange={e => setTitle(e.target.value)} placeholder="Что нужно реализовать?"/></label><label>ID внешнего трекера<input value={external} onChange={e => setExternal(e.target.value)} placeholder="PROJ-452 или 123"/></label></div>
     <label>Описание (ТЗ)<textarea required rows={6} value={description} onChange={e => setDescription(e.target.value)} placeholder="Цель, требования и критерии приемки..."/></label>
-    <div className="grid gap-4 sm:grid-cols-2"><label>Майлстон<input value={milestone} onChange={e => setMilestone(e.target.value)} placeholder="Прототип"/></label><label>Спринт<input value={sprint} onChange={e => setSprint(e.target.value)} placeholder="Спринт 1"/></label></div>
+    <div className="grid gap-4 sm:grid-cols-3"><label>Проект<input value={project} onChange={e => setProject(e.target.value)} placeholder="Название проекта"/></label><label>Майлстон<input value={milestone} onChange={e => setMilestone(e.target.value)} placeholder="Прототип"/></label><label>Спринт<input value={sprint} onChange={e => setSprint(e.target.value)} placeholder="Спринт 1"/></label></div>
     <label>Git-репозиторий задачи<input value={repository} onChange={e => setRepository(e.target.value)} placeholder="https://github.com/owner/repo.git"/></label>
     <label>Бюджет токенов<input type="number" min={0} value={budget} onChange={e => setBudget(e.target.value)} placeholder="Пусто — общий из настроек, 0 — без лимита"/></label>
     <div><div className="mb-2 text-xs text-slate-400">Зависимости</div><div className="grid max-h-36 gap-1 overflow-y-auto rounded-lg border border-slate-800 p-2">{tasks.filter(t => t.id !== task?.id).map(t => <label key={t.id} className="flex cursor-pointer grid-cols-none items-center gap-2 rounded p-2 text-xs hover:bg-slate-800"><input type="checkbox" className="!w-4 accent-indigo-500" checked={deps.includes(t.id)} onChange={() => setDeps(v => v.includes(t.id) ? v.filter(id => id !== t.id) : [...v, t.id])}/>#{t.id} {t.title}</label>)}{!tasks.filter(t => t.id !== task?.id).length && <span className="p-2 text-xs text-slate-600">Других задач пока нет</span>}</div></div>

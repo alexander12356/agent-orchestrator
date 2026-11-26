@@ -35,6 +35,45 @@ const architect: Agent = {
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
+it('filters by the full hierarchy along with status and search', () => {
+  const projectTask = { ...task, project: 'Zelya' };
+  const tasks = [
+    projectTask,
+    { ...projectTask, id: 8, title: 'Другой спринт', sprint: 'Спринт 2' },
+    { ...projectTask, id: 9, title: 'Другой майлстон', milestone: 'Бета' },
+    { ...projectTask, id: 10, title: 'Другой проект', project: 'Ninas' },
+    { ...projectTask, id: 11, title: 'Завершённая задача', current_stage: 6, status: 'done' },
+    { ...projectTask, id: 12, title: 'Legacy', project: undefined, milestone: undefined, sprint: undefined },
+  ];
+  render(<Tasks tasks={tasks} agents={[]} reload={vi.fn()} openTask={vi.fn()} onDeleted={vi.fn()} notify={vi.fn()}/>);
+  const tree = within(screen.getByRole('navigation', { name: 'Проекты, майлстоны и спринты' }));
+  const table = within(screen.getByRole('table'));
+  fireEvent.click(tree.getByRole('button', { name: 'Zelya' }));
+  expect(table.getByText('Другой майлстон')).toBeInTheDocument();
+  expect(table.queryByText('Другой проект')).not.toBeInTheDocument();
+  fireEvent.click(tree.getByRole('button', { name: 'Прототип' }));
+  expect(table.queryByText('Другой майлстон')).not.toBeInTheDocument();
+  fireEvent.click(tree.getByRole('button', { name: 'Спринт 1' }));
+  expect(table.queryByText('Другой спринт')).not.toBeInTheDocument();
+  expect(table.getByText('Завершённая задача')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole('button', { name: 'Open' }));
+  expect(table.queryByText('Завершённая задача')).not.toBeInTheDocument();
+  fireEvent.change(screen.getByPlaceholderText('Поиск задач...'), { target: { value: 'ZEL-17' } });
+  expect(table.getByText('Imported task')).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('button', { name: 'Новая задача' }));
+  expect(screen.getByLabelText('Проект')).toHaveValue('Zelya');
+  expect(screen.getByLabelText('Майлстон')).toHaveValue('Прототип');
+  expect(screen.getByLabelText('Спринт')).toHaveValue('Спринт 1');
+  fireEvent.click(screen.getByRole('button', { name: 'Отмена' }));
+  fireEvent.change(screen.getByPlaceholderText('Поиск задач...'), { target: { value: 'Legacy' } });
+  expect(screen.getByText('Задач не найдено')).toBeInTheDocument();
+  fireEvent.click(tree.getByRole('button', { name: 'Без проекта' }));
+  fireEvent.click(tree.getByRole('button', { name: 'Без майлстона' }));
+  fireEvent.click(tree.getByRole('button', { name: 'Без спринта' }));
+  expect(table.getByText('Legacy')).toBeInTheDocument();
+});
+
 it('shows each token category for each task in the list', () => {
   const spentTask = { ...task, id: 8, title: 'Processed task', total_tokens: 12564, input_tokens: 12000, cache_tokens: 64, output_tokens: 500, usage_partial: true };
   render(<Tasks tasks={[task, spentTask]} agents={[]} reload={vi.fn()} openTask={vi.fn()} onDeleted={vi.fn()} notify={vi.fn()}/>);

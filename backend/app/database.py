@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     external_issue_id TEXT,
     external_issue_key TEXT,
     external_issue_url TEXT,
+    project TEXT NOT NULL DEFAULT '',
     milestone TEXT,
     sprint TEXT,
     current_stage INTEGER NOT NULL DEFAULT 0,
@@ -169,6 +170,7 @@ def init_db() -> None:
             if column not in columns:
                 conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} TEXT")
         for column, definition in (
+            ("project", "TEXT NOT NULL DEFAULT ''"),
             ("single_stage", "INTEGER NOT NULL DEFAULT 0"),
             ("cleanup_pending", "INTEGER NOT NULL DEFAULT 0"),
             ("cleanup_head", "TEXT"),

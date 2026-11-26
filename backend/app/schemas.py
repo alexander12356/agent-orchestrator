@@ -49,6 +49,7 @@ class TaskBase(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     description: str = ""
     external_issue_id: str | None = None
+    project: str = ""
     milestone: str = ""
     sprint: str = ""
     repository_url: str = ""

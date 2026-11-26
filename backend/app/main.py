@@ -181,8 +181,8 @@ async def create_task(data: TaskCreate) -> dict[str, Any]:
         ).fetchone())
         timestamp = now()
         cursor = conn.execute(
-            "INSERT INTO tasks(title, description, external_issue_id, milestone, sprint, repository_url, current_stage, status, branch_name, stage_agents, token_budget, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (data.title, data.description, data.external_issue_id, data.milestone, data.sprint, data.repository_url.strip(), 0 if blocked else 1, "blocked_main" if blocked else "queued", "pending", dumps(assignments), data.token_budget, timestamp, timestamp),
+            "INSERT INTO tasks(title, description, external_issue_id, project, milestone, sprint, repository_url, current_stage, status, branch_name, stage_agents, token_budget, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (data.title, data.description, data.external_issue_id, data.project.strip(), data.milestone, data.sprint, data.repository_url.strip(), 0 if blocked else 1, "blocked_main" if blocked else "queued", "pending", dumps(assignments), data.token_budget, timestamp, timestamp),
         )
         task_id = cursor.lastrowid
         conn.execute("UPDATE tasks SET branch_name=? WHERE id=?", (branch_name(task_id), task_id))
@@ -218,9 +218,10 @@ def update_task(task_id: int, data: TaskUpdate) -> dict[str, Any]:
         validate_dependencies(conn, task_id, data.dependencies)
         validate_agent_assignments(conn, data.stage_agents)
         assignments = {str(k): v for k, v in data.stage_agents.items()}
+        project = data.project.strip() if "project" in data.model_fields_set else None
         conn.execute(
-            "UPDATE tasks SET title=?, description=?, external_issue_id=?, milestone=?, sprint=?, repository_url=?, stage_agents=?, token_budget=?, updated_at=? WHERE id=?",
-            (data.title, data.description, data.external_issue_id, data.milestone, data.sprint, data.repository_url.strip(), dumps(assignments), data.token_budget, now(), task_id),
+            "UPDATE tasks SET title=?, description=?, external_issue_id=?, project=COALESCE(?, project), milestone=?, sprint=?, repository_url=?, stage_agents=?, token_budget=?, updated_at=? WHERE id=?",
+            (data.title, data.description, data.external_issue_id, project, data.milestone, data.sprint, data.repository_url.strip(), dumps(assignments), data.token_budget, now(), task_id),
         )
         conn.execute("DELETE FROM task_dependencies WHERE task_id=?", (task_id,))
         for dependency in data.dependencies:
@@ -404,14 +405,14 @@ async def import_yougile_tasks() -> dict[str, int]:
             if existing:
                 task_id = existing["id"]
                 conn.execute(
-                    "UPDATE tasks SET title=?, description=?, external_issue_key=?, external_issue_url=?, repository_url=CASE WHEN repository_url IS NULL OR repository_url='' THEN ? ELSE repository_url END, updated_at=? WHERE id=?",
-                    (item["title"], item["description"], item.get("key", ""), issue_url, repository, timestamp, task_id),
+                    "UPDATE tasks SET title=?, description=?, external_issue_key=?, external_issue_url=?, project=COALESCE(NULLIF(project, ''), ?), repository_url=CASE WHEN repository_url IS NULL OR repository_url='' THEN ? ELSE repository_url END, updated_at=? WHERE id=?",
+                    (item["title"], item["description"], item.get("key", ""), issue_url, project, repository, timestamp, task_id),
                 )
                 updated += 1
             else:
                 cursor = conn.execute(
-                    "INSERT INTO tasks(title, description, external_issue_id, external_issue_key, external_issue_url, repository_url, current_stage, status, branch_name, stage_agents, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 1, 'open', 'pending', ?, ?, ?)",
-                    (item["title"], item["description"], item["id"], item.get("key", ""), issue_url, repository, dumps({}), timestamp, timestamp),
+                    "INSERT INTO tasks(title, description, external_issue_id, external_issue_key, external_issue_url, project, repository_url, current_stage, status, branch_name, stage_agents, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'open', 'pending', ?, ?, ?)",
+                    (item["title"], item["description"], item["id"], item.get("key", ""), issue_url, project, repository, dumps({}), timestamp, timestamp),
                 )
                 task_id = cursor.lastrowid
                 conn.execute("UPDATE tasks SET branch_name=? WHERE id=?", (branch_name(task_id, item.get("key")), task_id))

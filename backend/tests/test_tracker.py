@@ -297,11 +297,14 @@ def test_import_endpoint_is_idempotent_and_preserves_active_tasks(client, monkey
     assert first.json() == {'imported': 2, 'updated': 0, 'skipped': 0, 'total': 2}
     tasks = client.get('/api/tasks').json()
     assert {task['status'] for task in tasks} == {'open'}
+    assert {task['project'] for task in tasks} == {'Unity'}
     assert all(task['current_agent'] is None for task in tasks)
     assert next(task for task in tasks if task['external_issue_id'] == 'task-open')['external_issue_key'] == 'ZEL-17'
     assert next(task for task in tasks if task['external_issue_id'] == 'task-open')['external_issue_url'] == 'https://ru.yougile.com/team/068505cc4436/#ZEL-17'
     with connect() as conn:
         conn.execute("UPDATE tasks SET milestone='Прототип', sprint='Спринт 1'")
+        conn.execute("UPDATE tasks SET project='Local project' WHERE external_issue_id='task-open'")
+        conn.execute("UPDATE tasks SET project='' WHERE external_issue_id='task-ready'")
     imported_open = next(task for task in tasks if task['external_issue_id'] == 'task-open')
     directory = settings.storage_dir / 'tasks' / str(imported_open['id'])
     assert (directory / '00_task.md').exists()
@@ -309,8 +312,11 @@ def test_import_endpoint_is_idempotent_and_preserves_active_tasks(client, monkey
 
     second = client.post('/api/integrations/yougile/import')
     assert second.json() == {'imported': 0, 'updated': 2, 'skipped': 0, 'total': 2}
-    assert len(client.get('/api/tasks').json()) == 2
-    assert all(task['milestone'] == 'Прототип' and task['sprint'] == 'Спринт 1' for task in client.get('/api/tasks').json())
+    tasks = client.get('/api/tasks').json()
+    assert {task['external_issue_id']: task['project'] for task in tasks} == {
+        'task-open': 'Local project', 'task-ready': 'Unity',
+    }
+    assert all(task['milestone'] == 'Прототип' and task['sprint'] == 'Спринт 1' for task in tasks)
 
     with connect() as conn:
         conn.execute("UPDATE tasks SET status='running', title='Local title' WHERE external_issue_id='task-open'")
