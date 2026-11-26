@@ -3,7 +3,7 @@ import importlib.util
 import json
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 
 import pytest
@@ -256,7 +256,7 @@ def fallback_worker(tmp_path, answers):
     worker.logs = []
     calls = []
 
-    async def run_agent(task_id, path, config, prompt, timeout, run_id=None):
+    async def run_agent(task_id, path, config, prompt, timeout, run_id=None, publish_usage=None):
         calls.append(config)
         answer = answers[len(calls) - 1]
         if isinstance(answer, Exception):
@@ -348,6 +348,50 @@ def test_worker_reports_the_prompt_passed_to_cli(tmp_path):
     assert result['exit_code'] == 0
     assert messages == [{'type': 'TASK_PROMPT', 'task_id': 1, 'run_id': 7, 'prompt': result['output']}]
     assert result['output'].startswith('implement\n\nДля Live Logs')
+
+
+def test_kimi_worker_reports_live_and_final_windows_usage(monkeypatch, tmp_path):
+    worker = make_worker(tmp_path)
+    cwd = PureWindowsPath(r'D:\worktrees\task-1')
+    monkeypatch.setattr(worker, 'kimi_usage_location', lambda *args: asyncio.sleep(0, result=(tmp_path, cwd)))
+    script = tmp_path / 'kimi.py'
+    script.write_text(
+        'import json, time\n'
+        'from pathlib import Path\n'
+        'session = Path("sessions/worktree/session_12345678-1234-1234-1234-123456789abc")\n'
+        'wire = session / "agents/main/wire.jsonl"\n'
+        'wire.parent.mkdir(parents=True)\n'
+        f'(session / "state.json").write_text(json.dumps(dict(cwd={str(cwd).lower()!r}, createdAt=time.time_ns() // 1000000)))\n'
+        'record = json.dumps(dict(type="usage.record", usage=dict(inputOther=10, inputCacheRead=20, output=3))) + "\\n"\n'
+        'wire.write_text(record)\n'
+        'for _ in range(200):\n'
+        '    if Path("reported").exists():\n'
+        '        break\n'
+        '    time.sleep(.05)\n'
+        'else:\n'
+        '    raise SystemExit("usage did not arrive while the CLI was running")\n'
+        'with wire.open("a") as stream:\n'
+        '    stream.write(record)\n'
+        'print(json.dumps(dict(type="session.resume_hint", session_id=session.name)))\n',
+        encoding='utf-8',
+    )
+    monkeypatch.setattr(worker, 'command', lambda *args: [sys.executable, str(script)])
+    updates = []
+
+    async def send(message):
+        if message['type'] == 'TASK_USAGE':
+            updates.append(tuple(message[key] for key in module.FIELDS))
+            (tmp_path / 'reported').touch()
+
+    worker.send = send
+    _, result = asyncio.run(worker.run_with_fallback(
+        1, tmp_path, 'implement', {'primary': KIMI}, {}, run_id=7,
+        previous_usage={'input_tokens': 5, 'cache_tokens': 8, 'output_tokens': 2},
+    ))
+
+    assert updates == [(15, 28, 5), (25, 48, 8)]
+    assert tuple(result[key] for key in module.FIELDS) == updates[-1]
+    assert result['usage_partial'] is False
 
 
 def test_run_agent_reads_long_lines_and_ignores_limit_words_in_prose(tmp_path):

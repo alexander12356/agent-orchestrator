@@ -12,9 +12,9 @@ import signal
 import sys
 import tempfile
 from contextlib import contextmanager, suppress
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Awaitable, Callable
 from urllib.parse import urlsplit
 
 import websockets
@@ -22,7 +22,7 @@ import websockets
 # The worker can be started directly as a script from any working directory.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from backend.app.progress import progress_prompt
-from backend.app.usage import extract_usage, zcode_usage, FIELDS
+from backend.app.usage import FIELDS, extract_usage, recent_kimi_usage, zcode_usage
 
 RATE_LIMIT_RE = re.compile(r"rate.?limit|usage.?limit|quota exceeded|\b429\b|try again later", re.I)
 # A plain text line has to read like a CLI error report before it is checked for a limit.
@@ -215,8 +215,8 @@ class UnityWorker:
         print(text, end="", flush=True)
         await self.send({"type": "LOG_CHUNK", "task_id": task_id, "chunk": text, "format": "activity"})
 
-    async def execute(self, command: list[str], cwd: Path | None = None) -> tuple[int, str]:
-        process = await self.start_process(command, cwd=cwd)
+    async def execute(self, command: list[str], cwd: Path | None = None, *, env: dict[str, str] | None = None) -> tuple[int, str]:
+        process = await self.start_process(command, cwd=cwd, env=env)
         output_task = asyncio.create_task(process.communicate())
         try:
             output, _ = await asyncio.shield(output_task)
@@ -406,21 +406,47 @@ class UnityWorker:
             with suppress(asyncio.CancelledError):
                 await consumer
 
-    async def run_agent(self, task_id: int, path: Path, config: dict[str, Any], prompt: str, timeout: int, run_id: int | None = None) -> dict[str, Any]:
+    async def kimi_usage_location(self, command: list[str], path: Path, env: dict[str, str]) -> tuple[Path, PureWindowsPath | Path]:
+        if os.name != "nt" and command and command[0] == str(KIMI_NODE):
+            try:
+                code, home = await self.execute([
+                    command[0], "-p",
+                    "process.env.KIMI_CODE_HOME || require('node:path').join(require('node:os').homedir(), '.kimi-code')",
+                ], path, env=env)
+                if code == 0 and home.strip():
+                    code, mounted_home = await self.execute(["wslpath", "-u", home.strip()])
+                    if code == 0 and mounted_home.strip():
+                        return Path(mounted_home.strip()), PureWindowsPath(windows_path(path))
+            except OSError:
+                pass
+        return Path(env.get("KIMI_CODE_HOME") or Path.home() / ".kimi-code"), path
+
+    async def run_agent(
+        self, task_id: int, path: Path, config: dict[str, Any], prompt: str, timeout: int,
+        run_id: int | None = None, publish_usage: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    ) -> dict[str, Any]:
         async def publish(text: str) -> None:
             await self.log(task_id, text)
 
         async with progress_prompt(prompt, path, publish) as prompt:
-            return await self._run_cli(task_id, path, config, prompt, timeout, run_id)
+            return await self._run_cli(task_id, path, config, prompt, timeout, run_id, publish_usage)
 
-    async def _run_cli(self, task_id: int, path: Path, config: dict[str, Any], prompt: str, timeout: int, run_id: int | None) -> dict[str, Any]:
+    async def _run_cli(
+        self, task_id: int, path: Path, config: dict[str, Any], prompt: str, timeout: int,
+        run_id: int | None, publish_usage: Callable[[dict[str, Any]], Awaitable[None]] | None,
+    ) -> dict[str, Any]:
         command = self.command(config, prompt, path)
         env = os.environ.copy()
-        if config.get("cli") == "kimi":
+        is_kimi = config.get("cli") == "kimi"
+        usage_cwd = path
+        kimi_home = Path(env.get("KIMI_CODE_HOME") or Path.home() / ".kimi-code")
+        if is_kimi:
             env.update(kimi_environment(config))
+            kimi_home, usage_cwd = await self.kimi_usage_location(command, path, env)
         if config.get("cli") == "zcode":
             env.update(zcode_environment())
         started = datetime.now(UTC)
+        track_kimi_session = is_kimi and not config.get("command")
         process = await self.start_process(command, cwd=path, env=env)
         lines: list[str] = []
         limited = False
@@ -449,12 +475,22 @@ class UnityWorker:
                 await handle_line(buffer)
 
         consumer = asyncio.create_task(consume())
+        waiter = asyncio.create_task(process.wait())
+        live_usage = {}
         timed_out = False
         try:
             if run_id is not None:
                 await self.send({"type": "TASK_PROMPT", "task_id": task_id, "run_id": run_id, "prompt": prompt})
             try:
-                await asyncio.wait_for(process.wait(), timeout * 60)
+                async with asyncio.timeout(timeout * 60):
+                    if track_kimi_session and publish_usage is not None:
+                        while not (await asyncio.wait({waiter}, timeout=5))[0]:
+                            usage = await asyncio.to_thread(recent_kimi_usage, kimi_home, usage_cwd, started)
+                            if usage and usage != live_usage:
+                                live_usage = usage
+                                await publish_usage(usage)
+                    else:
+                        await waiter
             except TimeoutError:
                 timed_out = True
                 await self.terminate_process(process)
@@ -464,6 +500,9 @@ class UnityWorker:
         finally:
             if process.returncode is None:
                 await self.terminate_process(process)
+            waiter.cancel()
+            with suppress(asyncio.CancelledError):
+                await waiter
             await self.finish_consumer(consumer)
         output = "".join(lines)
         # A failed run is judged by the end of its output too: a text CLI may report the
@@ -472,7 +511,9 @@ class UnityWorker:
             limited = False
         elif not limited and not timed_out and limited_in_tail(lines):
             limited = True
-        usage = extract_usage(output, path, env.get("KIMI_CODE_HOME", Path.home() / ".kimi-code"))
+        usage = extract_usage(output, usage_cwd, kimi_home)
+        if not usage and track_kimi_session:
+            usage = await asyncio.to_thread(recent_kimi_usage, kimi_home, usage_cwd, started) or live_usage
         if not usage and config.get("cli") == "zcode":
             usage = zcode_usage(path, started, datetime.now(UTC))
         usage = usage or {"estimated": True}
@@ -501,6 +542,12 @@ class UnityWorker:
         totals = {key: previous_usage.get(key, 0) for key in FIELDS}
         partial = previous_usage.get("usage_partial", False)
         failures: list[str] = []
+
+        async def publish_usage(usage: dict[str, Any]) -> None:
+            counts = {key: totals[key] + usage.get(key, 0) for key in FIELDS}
+            await self.send({"type": "TASK_USAGE", "task_id": task_id, "run_id": run_id, **counts,
+                             "usage_partial": partial or usage.get("estimated", False)})
+
         for index, candidate in enumerate(configs):
             label = self.config_label(candidate)
             if run_id is not None:
@@ -511,7 +558,8 @@ class UnityWorker:
             if index:
                 await self.log(task_id, f"Fallback: {label} — запуск\n")
             try:
-                result = await self.run_agent(task_id, path, candidate, prompt, timeout, run_id)
+                result = await self.run_agent(task_id, path, candidate, prompt, timeout, run_id,
+                                              publish_usage if run_id is not None else None)
             except Exception as exc:
                 partial = True
                 failures.append(f"{label}: {exc}")
@@ -520,11 +568,11 @@ class UnityWorker:
                 next_label = self.config_label(configs[index + 1])
                 await self.log(task_id, f"{label}: не удалось запустить CLI ({exc}). Переключаюсь на fallback: {next_label}\n")
                 continue
+            if run_id is not None:
+                await publish_usage(result)
             for key in FIELDS:
                 totals[key] += result.get(key, 0)
             partial |= result.get("estimated", False)
-            if run_id is not None:
-                await self.send({"type": "TASK_USAGE", "task_id": task_id, "run_id": run_id, **totals, "usage_partial": partial})
             details = self.failure_details(result, timeout)
             if details is None:
                 return candidate, {**result, **totals, "estimated": False, "usage_partial": partial}

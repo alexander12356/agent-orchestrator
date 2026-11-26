@@ -3,7 +3,7 @@ import json
 import re
 import sqlite3
 from contextlib import closing
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 FIELDS = ("input_tokens", "cache_tokens", "output_tokens")
 
@@ -55,11 +55,21 @@ def normalize(usage):
     return dict(input_tokens=incoming, cache_tokens=cache, output_tokens=outgoing, estimated=False)
 
 
-def kimi_usage(session, cwd):
+def kimi_session_state(session, cwd):
     try:
         state = json.loads((session / "state.json").read_text(encoding="utf-8"))
-        if Path(state["cwd"]).resolve() != cwd.resolve():
-            return {}
+        recorded = state["cwd"]
+        if isinstance(cwd, PureWindowsPath):
+            return state if PureWindowsPath(recorded) == cwd else {}
+        return state if Path(recorded).resolve() == cwd.resolve() else {}
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+
+
+def kimi_usage(session, cwd):
+    if not kimi_session_state(session, cwd):
+        return {}
+    try:
         totals = dict.fromkeys(FIELDS, 0)
         found = False
         for wire in session.glob("agents/*/wire.jsonl"):
@@ -76,6 +86,24 @@ def kimi_usage(session, cwd):
         return dict(**totals, estimated=False) if found else {}
     except (OSError, ValueError, KeyError, TypeError):
         return {}
+
+
+def recent_kimi_usage(home, cwd, started):
+    since = int(started.timestamp() * 1000)
+    sessions = []
+    for state_file in (home / "sessions").glob("*/*/state.json"):
+        try:
+            if state_file.stat().st_mtime_ns // 1_000_000 < since:
+                continue
+        except OSError:
+            continue
+        session = state_file.parent
+        created = kimi_session_state(session, cwd).get("createdAt")
+        if type(created) is int and created >= since:
+            sessions.append(session)
+            if len(sessions) > 1:
+                return {}
+    return kimi_usage(sessions[0], cwd) if sessions else {}
 
 
 def zcode_usage(cwd, start, end):
