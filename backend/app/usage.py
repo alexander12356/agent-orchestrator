@@ -66,7 +66,7 @@ def kimi_session_state(session, cwd):
         return {}
 
 
-def kimi_usage(session, cwd):
+def kimi_usage(session, cwd, since=None):
     if not kimi_session_state(session, cwd):
         return {}
     try:
@@ -77,6 +77,12 @@ def kimi_usage(session, cwd):
                 for event in objects(stream):
                     if event.get("type") != "usage.record":
                         continue
+                    if since is not None:
+                        timestamp = event.get("time")
+                        if type(timestamp) is not int:
+                            return {}
+                        if timestamp < since:
+                            continue
                     usage = normalize(event.get("usage"))
                     if not usage:
                         return {}
@@ -135,7 +141,7 @@ def zcode_usage(cwd, start, end):
     return dict(**totals, estimated=False) if rows else {}
 
 
-def extract_usage(output, cwd=None, kimi_home=None):
+def extract_usage(output, cwd=None, kimi_home=None, *, kimi_since=None):
     result = {}
     for event in objects(output.splitlines()):
         kind = event.get("type")
@@ -143,7 +149,7 @@ def extract_usage(output, cwd=None, kimi_home=None):
             session_id = event.get("session_id")
             if isinstance(session_id, str) and re.fullmatch(r"session_[a-fA-F0-9-]{36}", session_id):
                 for session in (Path(kimi_home) / "sessions").glob(f"*/{session_id}"):
-                    result = kimi_usage(session, cwd) or result
+                    result = kimi_usage(session, cwd, kimi_since) or result
         if kind not in (None, "result", "turn.completed"):
             continue
         nested = event.get("result")

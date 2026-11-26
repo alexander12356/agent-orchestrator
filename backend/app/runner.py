@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable
 
 from .progress import progress_prompt
-from .usage import extract_usage, zcode_usage
+from .usage import extract_usage, normalize, objects, zcode_usage
 
 RATE_LIMIT_RE = re.compile(r"rate.?limit|usage.?limit|quota exceeded|\b429\b|try again later", re.I)
 # A plain text line has to read like a CLI error report before it is checked for a limit.
@@ -26,6 +26,7 @@ KIMI_NODE = Path("/home/paperclip/.local/opt/node-v24.15.0-linux-x64/bin/node")
 KIMI_ENTRY = Path("/mnt/e/WSL/ZelyaKimiWindows/node_modules/@moonshot-ai/kimi-code/dist/main.mjs")
 KIMI_HOME = Path("/mnt/c/Users/Meku/.kimi-code")
 CURSOR_PROGRESS_PREFIX = "Прогресс:"
+SESSION_UUID = r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}"
 
 
 def signal_cli(process: asyncio.subprocess.Process, *, force: bool = False) -> None:
@@ -49,6 +50,7 @@ class RunResult:
     estimated: bool = False
     rate_limited: bool = False
     timed_out: bool = False
+    session_id: str | None = None
 
 
 @dataclass
@@ -57,6 +59,8 @@ class ProcessRunner:
     rate_limit_callback: Callable[[], Awaitable[None]] | None = None
     on_process: Callable[[asyncio.subprocess.Process], None] | None = None
     on_prompt_sent: Callable[[str], None] | None = None
+    tracked_cli: str | None = None
+    resume_session_id: str | None = None
 
     async def run(
         self,
@@ -85,11 +89,25 @@ class ProcessRunner:
         *, cursor_progress: bool = False,
     ) -> RunResult:
         command = build_command(config, prompt, cwd, int(env.get("ORCHESTRATOR_STAGE", "0")), Path(env["ORCHESTRATOR_REPO"]) if env.get("ORCHESTRATOR_REPO") else None)
+        if self.tracked_cli == "zcode":
+            command.insert(1, "--json")
+        if self.resume_session_id:
+            if self.tracked_cli == "kimi":
+                command.extend(["--session", self.resume_session_id])
+            elif self.tracked_cli == "zcode":
+                command[1:1] = ["--resume", self.resume_session_id]
+            else:
+                command.insert(1, f"--resume={self.resume_session_id}")
         env = {**os.environ, **env, **cli_environment(config)}
         started = datetime.now(UTC)
 
         def measured_usage(output):
-            usage = extract_usage(output, cwd, env.get("KIMI_CODE_HOME", Path.home() / ".kimi-code"))
+            kimi_since = int(started.timestamp() * 1000) if self.tracked_cli == "kimi" and self.resume_session_id else None
+            usage = extract_usage(output, cwd, env.get("KIMI_CODE_HOME", Path.home() / ".kimi-code"), kimi_since=kimi_since)
+            if self.tracked_cli == "zcode":
+                raw = zcode_result(output).get("usage")
+                if isinstance(raw, dict):
+                    usage = normalize({**raw, "cached_input_tokens": raw.get("cacheReadTokens", 0)})
             if not usage and Path(command[0]).stem.lower() == "zcode":
                 usage = zcode_usage(cwd, started, datetime.now(UTC))
             return usage or {"estimated": True}
@@ -167,7 +185,10 @@ class ProcessRunner:
         if not limited and (process.returncode or 0) != 0 and limited_in_tail(lines):
             limited = True
         usage = measured_usage(output)
-        return RunResult(process.returncode or 0, output, **usage, rate_limited=limited)
+        return RunResult(
+            process.returncode or 0, output, **usage, rate_limited=limited,
+            session_id=cli_session_id(self.tracked_cli, output),
+        )
 
 
 def rate_limited_line(text: str) -> bool:
@@ -330,6 +351,46 @@ def resolve_executable(name: str) -> str:
 
 def is_cursor_cli(program: str) -> bool:
     return Path(program).name.lower().removesuffix(".exe") in {"agent", "cursor-agent"}
+
+
+def resumable_cli(config: dict[str, Any]) -> str | None:
+    custom = config.get("command")
+    if not custom:
+        return config["cli"] if config["cli"] in ("zcode", "kimi") else None
+    args = shlex.split(custom, posix=os.name != "nt")
+    if args and is_cursor_cli(args[0].strip('"')) and not any(
+        arg.split("=", 1)[0] in ("--continue", "--resume") for arg in args
+    ):
+        return "cursor"
+    return None
+
+
+def zcode_result(output: str) -> dict:
+    # Diagnostics can precede ZCode's indented JSON result.
+    for start in reversed(list(re.finditer(r"(?m)^\{", output))):
+        try:
+            event, _ = json.JSONDecoder().raw_decode(output, start.start())
+        except ValueError:
+            continue
+        if isinstance(event, dict) and "sessionId" in event:
+            return event
+    return {}
+
+
+def cli_session_id(cli: str | None, output: str) -> str | None:
+    if cli == "zcode":
+        session_id = zcode_result(output).get("sessionId")
+        pattern = "sess_" + SESSION_UUID
+    elif cli in ("cursor", "kimi"):
+        kind = ("result", "success") if cli == "cursor" else ("session.resume_hint", None)
+        session_id = next((
+            event.get("session_id") for event in objects(reversed(output.splitlines()))
+            if (event.get("type"), event.get("subtype")) == kind
+        ), None)
+        pattern = ("session_" if cli == "kimi" else "") + SESSION_UUID
+    else:
+        return None
+    return session_id if isinstance(session_id, str) and re.fullmatch(pattern, session_id) else None
 
 
 def cursor_progress_messages(line: str) -> list[str]:

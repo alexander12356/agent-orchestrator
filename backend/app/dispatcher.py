@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+from hashlib import sha256
 import json
 import re
 import shutil
@@ -12,7 +13,7 @@ from .config import settings
 from .database import connect, decode_agent, decode_task, now, spent_tokens, transaction
 from .events import bus
 from .repo import UNITY_PROJECT_DIRS, RepoError, prepare_checkout, repository_url, unity_project_root
-from .runner import ProcessRunner, RunResult, signal_cli
+from .runner import ProcessRunner, RunResult, resumable_cli, signal_cli
 from .schemas import IntegrationSettings
 from .telegram import notify_decision
 from .tracker import find_reply, integration_settings, publish_questions
@@ -36,6 +37,7 @@ CHECKOUT_GUIDANCE = {
 }
 VERDICT_CONTRACT = '{"status": "APPROVED"|"REJECTED", "summary": string, "comments": string[], "notes": string[]}'
 VERSION_RE = re.compile(r"_v(\d+)\.")
+NEO_RESUME_LIMIT = 2
 
 
 class StageFailure(RuntimeError):
@@ -658,6 +660,33 @@ class Dispatcher:
                 )
 
         configs = [agent["primary_config"], *agent["fallback_configs"]]
+        tracked = {}
+        if stage == 1 and agent["name"] == "Neo":
+            for index, config in enumerate(configs):
+                if cli := resumable_cli(config):
+                    data = json.dumps([config, agent["role_prompt"], checkout], sort_keys=True, default=str)
+                    tracked[index] = (cli, sha256(data.encode()).hexdigest())
+        continuation = None
+        answer_file = directory / f"01_answers_v{attempt - 1}.md"
+        if (
+            tracked and revise and review is None and answer_file.is_file()
+            and doc.name == STAGE_FILES[1].format(attempt=attempt - 1)
+        ):
+            with connect() as conn:
+                prior = conn.execute(
+                    "SELECT cli_session FROM stage_runs "
+                    "WHERE task_id=? AND stage=1 AND attempt=? AND agent_id=? AND status='completed'",
+                    (task["id"], attempt - 1, agent["id"]),
+                ).fetchone()
+            if prior and prior["cli_session"]:
+                session = json.loads(prior["cli_session"])
+                if session["resumes"] < NEO_RESUME_LIMIT:
+                    for index, (_, fingerprint) in tracked.items():
+                        if session["fingerprint"] == fingerprint:
+                            continuation = session
+                            continuation_index = index
+                            break
+        next_session = None
         with contextlib.ExitStack() as stack:
             unity_root = None
             if checkout and stage in CHECKOUT_GUIDANCE and shutil.which("unity-cli"):
@@ -681,7 +710,14 @@ class Dispatcher:
                 task, agent, stage, attempt, checkout=checkout, previous_error=previous_error,
                 doc=doc, review=review, draft=draft, unity_root=unity_root,
             )
-            for index, config in enumerate(configs):
+            launches = [(index, False) for index in range(len(configs))]
+            if continuation:
+                launches.insert(0, (continuation_index, True))
+            skip_fresh = None
+            for index, resumed in launches:
+                if index == skip_fresh:
+                    continue
+                config = configs[index]
                 if task["id"] in self.stop_requested:
                     return
                 if config.get("environment") == "worker":
@@ -694,11 +730,24 @@ class Dispatcher:
                         "UPDATE stage_runs SET cli_used=?, model_used=?, is_fallback=? WHERE id=? AND status='running'",
                         (config["cli"], config.get("model", ""), int(index > 0), run_id),
                     )
-                if index:
+                if index and not resumed:
                     await log(f"Fallback: {config['cli']} {config.get('model', '')}\n")
                 runner = ProcessRunner(log_callback=log, on_process=register_process, on_prompt_sent=record_prompt)
+                runner.tracked_cli, fingerprint = tracked.get(index, (None, None))
+                cli_prompt = prompt
+                if resumed:
+                    runner.resume_session_id = continuation["id"]
+                    await log(f"Продолжаю сессию Neo ({continuation['resumes'] + 1}/{NEO_RESUME_LIMIT})\n")
+                    cli_prompt = (
+                        "Продолжи уточнение техдокумента по согласованным ранее требованиям.\n"
+                        f"Последний ответ на твои вопросы:\n{answer_file.read_text(encoding='utf-8').strip()}\n\n"
+                        f"Внеси точечные правки в актуальную рабочую копию: {draft}. "
+                        f"Запиши JSON с новыми вопросами в {draft_questions}. "
+                        'Если вопросов нет, запиши {"has_questions": false, "questions": []}. '
+                        "Используй эти пути для вывода и текущие переменные окружения для локального checkout."
+                    )
                 result = await runner.run(
-                    config, prompt, directory, env, agent["fallback_triggers"].get("timeout_minutes", 20),
+                    config, cli_prompt, directory, env, agent["fallback_triggers"].get("timeout_minutes", 20),
                 )
                 with transaction() as conn:
                     conn.execute(
@@ -710,7 +759,10 @@ class Dispatcher:
                     self._mark_stopped(run_id)
                     return
                 validation_error = None
-                if draft and result.exit_code == 0:
+                session_id = result.session_id if fingerprint else None
+                if resumed and result.exit_code == 0 and session_id != continuation["id"]:
+                    validation_error = "CLI не подтвердил продолжение нужной сессии Neo."
+                if draft and result.exit_code == 0 and not validation_error:
                     try:
                         if not draft.is_file() or not draft.read_text(encoding="utf-8").strip() or not draft_questions.is_file():
                             raise StageFailure("Уточнение техдокумента не завершено: нужны рабочая копия и JSON с вопросами.")
@@ -722,14 +774,25 @@ class Dispatcher:
                         draft.replace(artifact)
                 success = result.exit_code == 0 and not validation_error and artifact.exists()
                 if success:
+                    if session_id:
+                        next_session = json.dumps({
+                            "id": session_id,
+                            "fingerprint": fingerprint,
+                            "resumes": continuation["resumes"] + 1 if resumed else 0,
+                        })
                     break
+                if resumed:
+                    if not (result.rate_limited or result.timed_out or result.exit_code == 127):
+                        await log("Продолжение Neo не завершилось. Запускаю свежую сессию с черновиком и ответами.\n")
+                        continue
+                    skip_fresh = index
                 triggers = agent["fallback_triggers"]
                 retry = (
                     (result.rate_limited and triggers.get("rate_limit", True))
                     or (result.timed_out and triggers.get("timeout", True))
                     or triggers.get("exit_code", True)
                 )
-                if not retry or index == len(configs) - 1:
+                if not retry or (not resumed and index == len(configs) - 1):
                     break
                 if result.exit_code == 127:
                     await log(result.output)
@@ -740,8 +803,8 @@ class Dispatcher:
         error = None if success else validation_error or describe_failure(result, artifact_name)
         with transaction() as conn:
             conn.execute(
-                "UPDATE stage_runs SET artifact_path=?, status=?, finished_at=?, error=? WHERE id=?",
-                (str(artifact), status, now(), error, run_id),
+                "UPDATE stage_runs SET artifact_path=?, status=?, finished_at=?, error=?, cli_session=? WHERE id=?",
+                (str(artifact), status, now(), error, next_session, run_id),
             )
         if not success:
             raise StageFailure(error, retryable=not result.timed_out and not result.rate_limited and result.exit_code != 127)

@@ -199,6 +199,21 @@ def test_extract_cursor_usage_names():
     assert usage["estimated"] is False
 
 
+def test_resumed_kimi_usage_only_counts_the_new_turn(tmp_path):
+    session_id = "session_b41feaf1-1d74-42b1-a595-cd324f908759"
+    session = tmp_path / "sessions" / "workspace" / session_id
+    wire = session / "agents" / "main" / "wire.jsonl"
+    wire.parent.mkdir(parents=True)
+    (session / "state.json").write_text(json.dumps({"cwd": str(tmp_path)}), encoding="utf-8")
+    wire.write_text("\n".join(json.dumps({
+        "type": "usage.record", "time": timestamp, "usage": {"inputTokens": tokens, "outputTokens": 1},
+    }) for timestamp, tokens in [(100, 80), (200, 5)]), encoding="utf-8")
+    output = json.dumps({"type": "session.resume_hint", "session_id": session_id})
+    assert extract_usage(output, tmp_path, tmp_path, kimi_since=200) == {
+        "input_tokens": 5, "output_tokens": 1, "cache_tokens": 0, "estimated": False,
+    }
+
+
 def test_extract_structured_usage():
     usage = extract_usage('log\n{"usage":{"input_tokens":12,"output_tokens":8,"cache_read_input_tokens":3}}')
     assert usage == {'input_tokens': 12, 'output_tokens': 8, 'cache_tokens': 3, 'estimated': False}

@@ -155,6 +155,70 @@ def test_document_revision_after_answer_ignores_review_of_older_version(client, 
     )
 
 
+@pytest.mark.parametrize("cli", ["cursor", "zcode", "kimi"])
+@pytest.mark.parametrize("resume_fails", [False, True])
+def test_neo_resumes_the_cli_that_asked_and_limits_the_session(client, agent, idle, monkeypatch, cli, resume_fails):
+    primary = {"cli": "custom", "model": "grok", "command": "agent --print {prompt}"}
+    fallback = {"cli": cli, "model": "backup"}
+    response = client.put(f"/api/agents/{agent['id']}", json={
+        "name": "Neo", "primary_config": primary,
+        "fallback_configs": [] if cli == "cursor" else [fallback],
+    })
+    assert response.status_code == 200, response.text
+    task = make_task(client, response.json())
+    task_id = task["id"]
+    launches = []
+    version = 1
+    session = "first-session"
+    document = "## Сущности и связи\nТара\n## Алгоритм\nСмена тары\n## Сценарии\nВыбор тары.\n"
+
+    class FakeRunner:
+        resume_session_id = None
+
+        def __init__(self, **kwargs):
+            pass
+
+        async def run(self, config, prompt, cwd, env, timeout_minutes):
+            launches.append((self.tracked_cli, self.resume_session_id, prompt))
+            if self.tracked_cli != cli:
+                return RunResult(1, "unavailable")
+            if self.resume_session_id and resume_fails:
+                return RunResult(1, "session unavailable", input_tokens=3)
+            name = f"01_tech_doc_v{version}.md"
+            if version == 1:
+                draft = cwd / name
+            else:
+                draft, = (cwd / "logs").glob(f"tech-doc-*/{name}")
+                assert draft.read_text(encoding="utf-8") == document
+            draft.write_text(document, encoding="utf-8")
+            draft.with_name(f"01_questions_v{version}.json").write_text(
+                json.dumps({"has_questions": True, "questions": ["Next detail?"]}), encoding="utf-8",
+            )
+            return RunResult(0, "ok", input_tokens=5, session_id=session)
+
+    monkeypatch.setattr("app.dispatcher.ProcessRunner", FakeRunner)
+    asyncio.run(dispatcher.run_stage(task_id, 1))
+    launches.clear()
+    for version in range(2, 5 if not resume_fails else 3):
+        assert current(client, task_id)["status"] == "waiting_answer"
+        assert client.post(f"/api/tasks/{task_id}/answer", json={"answer": f"Answer {version - 1}"}).status_code == 202
+        if version == 4 or resume_fails:
+            session = "fresh-session"
+        asyncio.run(dispatcher.run_stage(task_id, 1))
+    relevant = [(resume, prompt) for used, resume, prompt in launches if used == cli]
+    if resume_fails:
+        assert [resume for resume, _ in relevant] == ["first-session", None]
+        with connect() as conn:
+            row = conn.execute("SELECT input_tokens FROM stage_runs WHERE task_id=? AND attempt=2", (task_id,)).fetchone()
+        assert row["input_tokens"] == 8
+    else:
+        assert [resume for resume, _ in relevant] == ["first-session", "first-session", None]
+        assert "Answer 1" not in relevant[1][1]
+        assert "Answer 1" in relevant[2][1]
+    assert "Answer 1" in relevant[0][1]
+    assert "Next detail?" in relevant[-1][1]
+
+
 def test_document_review_uses_current_scenario_format(client, agent, idle):
     task = make_task(client, agent)
     directory = task_dir(task['id'])
