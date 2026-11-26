@@ -1,6 +1,10 @@
+import asyncio
 import html
+import logging
 from datetime import UTC, datetime
+from time import time
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -9,6 +13,7 @@ from .database import connect
 
 BASE_URL = "https://yougile.com/api-v2"
 BOT_PREFIX = "[Agent Orchestrator]"
+logger = logging.getLogger(__name__)
 
 
 class YougileError(RuntimeError):
@@ -120,6 +125,63 @@ async def get_all(client: httpx.AsyncClient, path: str, config: dict[str, str], 
         if not paging.get("next") or not content:
             return items
         offset += len(content)
+
+
+async def move_task(client: httpx.AsyncClient, config: dict[str, str], issue_id: str, column_title: str) -> None:
+    request_headers = headers(config)
+    task_url = f"{BASE_URL}/tasks/{quote(issue_id, safe='')}"
+    response = await client.get(task_url, headers=request_headers)
+    await raise_for_status(response)
+    column_id = response.json()["columnId"]
+    response = await client.get(f"{BASE_URL}/columns/{quote(column_id, safe='')}", headers=request_headers)
+    await raise_for_status(response)
+    current = response.json()
+    target_name = "".join(column_title.split()).casefold()
+    if "".join(current["title"].split()).casefold() == target_name:
+        return
+    columns = await get_all(client, "/columns", config, {"boardId": current["boardId"]})
+    matches = [column for column in columns if "".join(column["title"].split()).casefold() == target_name]
+    if len(matches) != 1:
+        raise YougileError(f"На доске YouGile должна быть одна колонка «{column_title}»")
+    response = await client.put(task_url, headers=request_headers, json={"columnId": matches[0]["id"]})
+    await raise_for_status(response)
+
+
+async def sync_yougile_moves() -> None:
+    with connect() as conn:
+        moves = conn.execute(
+            """SELECT m.task_id, m.issue_id, m.column_title
+               FROM yougile_moves m JOIN tasks t ON t.id = m.task_id
+               WHERE m.pending = 1 AND m.retry_after <= ? AND m.issue_id = TRIM(t.external_issue_id)
+               ORDER BY m.retry_after, m.task_id LIMIT 10""",
+            (int(time()),),
+        ).fetchall()
+    if not moves:
+        return
+    config = integration_settings()
+    if not config.get("tracker_api_token"):
+        return
+    async with httpx.AsyncClient(timeout=10) as client:
+        for move in moves:
+            task_id, issue_id, column_title = move
+            pending, retry_after = 0, 0
+            try:
+                await move_task(client, config, issue_id, column_title)
+            except (YougileError, httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+                logger.warning("YouGile: задача %s, перенос в «%s»: %s", task_id, column_title, exc)
+                pending, retry_after = 1, int(time()) + 60
+            with connect() as conn:
+                conn.execute(
+                    """UPDATE yougile_moves SET pending=?, retry_after=?
+                       WHERE task_id=? AND issue_id=? AND column_title=?""",
+                    (pending, retry_after, task_id, issue_id, column_title),
+                )
+
+
+async def sync_yougile_moves_forever() -> None:
+    while True:
+        await sync_yougile_moves()
+        await asyncio.sleep(3)
 
 
 async def find_reply(issue_id: str, question_id: int) -> str | None:

@@ -86,6 +86,13 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS yougile_moves (
+    task_id INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+    issue_id TEXT NOT NULL,
+    column_title TEXT NOT NULL,
+    pending INTEGER NOT NULL DEFAULT 1,
+    retry_after INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
@@ -97,6 +104,36 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_stage_runs_task ON stage_runs(task_id, stage);
 CREATE INDEX IF NOT EXISTS idx_events_task ON events(task_id, id);
 """
+
+# Persist column changes in the same transaction as the task transition.
+# Retain the last target so moving between stages 1–4 does not repeat the API call.
+YOUGILE_MOVE_TRIGGERS = "\n".join(
+    f"""
+    CREATE TRIGGER IF NOT EXISTS {name} AFTER {event} ON tasks
+    WHEN NULLIF(TRIM(NEW.external_issue_id), '') IS NOT NULL
+        AND NEW.status NOT IN ('open', 'blocked_main')
+        AND (NEW.merged_to_main = 1 OR NEW.current_stage BETWEEN 1 AND 5)
+    BEGIN
+        INSERT INTO yougile_moves(task_id, issue_id, column_title)
+        VALUES (
+            NEW.id, TRIM(NEW.external_issue_id),
+            CASE
+                WHEN NEW.merged_to_main = 1 THEN 'Complete'
+                WHEN NEW.status = 'waiting_answer' THEN 'Blocked'
+                WHEN NEW.current_stage = 5 THEN 'Feedback'
+                ELSE 'In progress'
+            END
+        )
+        ON CONFLICT(task_id) DO UPDATE SET
+            issue_id=excluded.issue_id, column_title=excluded.column_title, pending=1, retry_after=0
+        WHERE yougile_moves.issue_id != excluded.issue_id OR yougile_moves.column_title != excluded.column_title;
+    END;
+    """
+    for name, event in (
+        ("yougile_move_on_insert", "INSERT"),
+        ("yougile_move_on_update", "UPDATE OF current_stage, status, merged_to_main, external_issue_id"),
+    )
+)
 
 
 def now() -> str:
@@ -125,7 +162,7 @@ def branch_name(task_id: int, issue_key: str | None = None) -> str:
 def init_db() -> None:
     settings.db_path.parent.mkdir(parents=True, exist_ok=True)
     with connect() as conn:
-        conn.executescript(SCHEMA)
+        conn.executescript(SCHEMA + YOUGILE_MOVE_TRIGGERS)
         conn.execute("BEGIN IMMEDIATE")
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
         for column in ("external_issue_key", "external_issue_url", "milestone", "sprint", "repository_url"):

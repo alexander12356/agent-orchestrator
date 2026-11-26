@@ -15,7 +15,11 @@ def disable_live_telegram(monkeypatch):
 
 
 @pytest.fixture()
-def client(tmp_path):
+def client(tmp_path, monkeypatch):
+    async def disable_yougile_background_sync():
+        pass
+
+    monkeypatch.setattr("app.main.sync_yougile_moves_forever", disable_yougile_background_sync)
     settings.storage_dir = tmp_path / "storage"
     settings.database_path = settings.storage_dir / "test.db"
     settings.auto_start = False

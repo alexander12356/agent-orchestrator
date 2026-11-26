@@ -21,7 +21,7 @@ from .database import branch_name, connect, decode_agent, decode_task, dumps, in
 from .dispatcher import dispatcher, limits, paused_artifacts, task_dir
 from .events import bus
 from .schemas import AgentCreate, AgentUpdate, IntegrationSettings, ManualMerge, TaskCreate, TaskUpdate, TrackerAnswer
-from .tracker import BOT_PREFIX, YougileError, ensure_webhook, fetch_chat_message, fetch_import_tasks, integration_settings, test_connection
+from .tracker import BOT_PREFIX, YougileError, ensure_webhook, fetch_chat_message, fetch_import_tasks, integration_settings, sync_yougile_moves_forever, test_connection
 from .worker_hub import hub
 
 
@@ -29,9 +29,14 @@ from .worker_hub import hub
 async def lifespan(app: FastAPI):
     init_db()
     dispatcher.recover()
-    yield
-    for task in list(dispatcher.pending):
-        task.cancel()
+    sync = asyncio.create_task(sync_yougile_moves_forever())
+    try:
+        yield
+    finally:
+        for task in list(dispatcher.pending):
+            task.cancel()
+        sync.cancel()
+        await asyncio.gather(sync, return_exceptions=True)
 
 
 app = FastAPI(title="Agent Orchestrator", version="1.0.0", lifespan=lifespan)

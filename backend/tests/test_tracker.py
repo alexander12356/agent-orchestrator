@@ -7,7 +7,7 @@ import pytest
 from app.config import settings
 from app.database import connect, now
 from app.dispatcher import dispatcher, task_dir
-from app.tracker import BOT_PREFIX, ensure_webhook, fetch_import_tasks, publish_questions, test_connection as check_connection
+from app.tracker import BOT_PREFIX, ensure_webhook, fetch_import_tasks, publish_questions, sync_yougile_moves, test_connection as check_connection
 from conftest import make_task
 
 
@@ -32,6 +32,10 @@ class FakeClient:
         self.requests.append(('POST', url, kwargs))
         return self.responses.pop(0)
 
+    async def put(self, url, **kwargs):
+        self.requests.append(('PUT', url, kwargs))
+        return self.responses.pop(0)
+
 
 def response(status=200, payload=None):
     return httpx.Response(status, json=payload or {}, request=httpx.Request('GET', 'https://yougile.test'))
@@ -51,6 +55,64 @@ def save_settings(client, **values):
         **values,
     }
     assert client.put('/api/settings', json=data).status_code == 200
+
+
+def test_yougile_column_follows_task_lifecycle(client, agent, monkeypatch):
+    save_settings(client)
+    task_id = make_task(client, agent)['id']
+    monkeypatch.setattr('app.tracker.httpx.AsyncClient', FakeClient)
+    monkeypatch.setattr(dispatcher, 'start', lambda task_id: asyncio.sleep(0))
+    FakeClient.requests = []
+
+    with connect() as conn:
+        conn.execute("UPDATE tasks SET external_issue_id='task-uuid', status='open' WHERE id=?", (task_id,))
+    asyncio.run(sync_yougile_moves())
+    assert not FakeClient.requests
+
+    def assert_move(source_id, source_title, target_id, target_title):
+        FakeClient.requests = []
+        FakeClient.responses = [
+            response(payload={'columnId': source_id}),
+            response(payload={'title': source_title, 'boardId': 'actual-board'}),
+            response(payload={'content': [{'title': target_title, 'id': target_id}]}),
+            response(),
+        ]
+        asyncio.run(sync_yougile_moves())
+        base = 'https://yougile.com/api-v2'
+        assert [(method, url) for method, url, _ in FakeClient.requests] == [
+            ('GET', f'{base}/tasks/task-uuid'), ('GET', f'{base}/columns/{source_id}'),
+            ('GET', f'{base}/columns'), ('PUT', f'{base}/tasks/task-uuid'),
+        ]
+        assert FakeClient.requests[2][2]['params']['boardId'] == 'actual-board'
+        assert FakeClient.requests[-1][2]['json'] == {'columnId': target_id}
+        assert not FakeClient.responses
+
+    assert client.post(f'/api/tasks/{task_id}/start?pipeline=true').status_code == 202
+    assert_move('open', 'Open', 'progress', 'InProgress')
+
+    with connect() as conn:
+        conn.execute("UPDATE tasks SET status='waiting_answer' WHERE id=?", (task_id,))
+    FakeClient.responses = [response(status=503)]
+    asyncio.run(sync_yougile_moves())
+    with connect() as conn:
+        pending, retry_after = conn.execute("SELECT pending, retry_after FROM yougile_moves WHERE task_id=?", (task_id,)).fetchone()
+        assert pending == 1 and retry_after > 0
+        conn.execute("UPDATE yougile_moves SET retry_after=0 WHERE task_id=?", (task_id,))
+    assert_move('progress', 'InProgress', 'blocked', 'Blocked')
+
+    assert client.post(f'/api/tasks/{task_id}/answer', json={'answer': 'Ответ'}).status_code == 202
+    assert_move('blocked', 'Blocked', 'progress', 'In progress')
+    FakeClient.requests = []
+    for stage in (2, 3, 4):
+        with connect() as conn:
+            conn.execute("UPDATE tasks SET current_stage=?, status='running' WHERE id=?", (stage, task_id))
+        asyncio.run(sync_yougile_moves())
+    assert not FakeClient.requests
+
+    assert client.post(f'/api/tasks/{task_id}/approve?stage=4').status_code == 202
+    assert_move('progress', 'In progress', 'feedback', 'Feedback')
+    assert client.post(f'/api/tasks/{task_id}/merge', json={}).status_code == 200
+    assert_move('feedback', 'Feedback', 'complete', 'Complete')
 
 
 def test_publish_questions_and_check_connection(client, monkeypatch):
