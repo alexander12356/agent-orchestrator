@@ -25,6 +25,7 @@ RATE_LIMIT_TAIL_LINES = 20
 KIMI_NODE = Path("/home/paperclip/.local/opt/node-v24.15.0-linux-x64/bin/node")
 KIMI_ENTRY = Path("/mnt/e/WSL/ZelyaKimiWindows/node_modules/@moonshot-ai/kimi-code/dist/main.mjs")
 KIMI_HOME = Path("/mnt/c/Users/Meku/.kimi-code")
+CURSOR_PROGRESS_PREFIX = "Прогресс:"
 
 
 def signal_cli(process: asyncio.subprocess.Process, *, force: bool = False) -> None:
@@ -65,11 +66,23 @@ class ProcessRunner:
         env: dict[str, str],
         timeout_minutes: int,
     ) -> RunResult:
+        custom = config.get("command")
+        parts = shlex.split(custom, posix=os.name != "nt") if custom else []
+        if self.log_callback and parts and is_cursor_cli(parts[0].strip('"')):
+            prompt += (
+                "\n\nДля Live Logs отправляй короткие публичные комментарии по-русски "
+                f"отдельными сообщениями, каждое в одну строку с префиксом «{CURSOR_PROGRESS_PREFIX}». "
+                "Перед первым инструментом сообщи, что проверишь и зачем. По ходу работы сообщай "
+                "о важных находках, решениях и результатах проверок. "
+                "Пиши комментарии обычным сообщением, без вызова инструмента."
+            )
+            return await self._run_cli(config, prompt, cwd, env, timeout_minutes, cursor_progress=True)
         async with progress_prompt(prompt, cwd, self.log_callback) as prompt:
             return await self._run_cli(config, prompt, cwd, env, timeout_minutes)
 
     async def _run_cli(
         self, config: dict[str, Any], prompt: str, cwd: Path, env: dict[str, str], timeout_minutes: int,
+        *, cursor_progress: bool = False,
     ) -> RunResult:
         command = build_command(config, prompt, cwd, int(env.get("ORCHESTRATOR_STAGE", "0")), Path(env["ORCHESTRATOR_REPO"]) if env.get("ORCHESTRATOR_REPO") else None)
         env = {**os.environ, **env, **cli_environment(config)}
@@ -105,6 +118,9 @@ class ProcessRunner:
                 if self.rate_limit_callback:
                     await self.rate_limit_callback()
                 return False
+            if cursor_progress and self.log_callback:
+                for message in cursor_progress_messages(text):
+                    await self.log_callback(message)
             return True
 
         async def consume() -> None:
@@ -312,8 +328,40 @@ def resolve_executable(name: str) -> str:
     return str(max(existing, key=lambda path: path.stat().st_mtime))
 
 
+def is_cursor_cli(program: str) -> bool:
+    return Path(program).name.lower().removesuffix(".exe") in {"agent", "cursor-agent"}
+
+
+def cursor_progress_messages(line: str) -> list[str]:
+    try:
+        event = json.loads(line)
+    except ValueError:
+        return []
+    if not isinstance(event, dict) or event.get("type") != "assistant":
+        return []
+    # Cursor emits a complete assistant message before a tool call or at turn end.
+    # The preceding timestamped deltas would duplicate that message.
+    if "timestamp_ms" in event and "model_call_id" not in event:
+        return []
+    message = event.get("message")
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return []
+    content = message.get("content")
+    if not isinstance(content, list):
+        return []
+    messages = []
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "text" or not isinstance(block.get("text"), str):
+            continue
+        for text in block["text"].splitlines():
+            text = text.strip()
+            if text.startswith(CURSOR_PROGRESS_PREFIX) and (body := text.removeprefix(CURSOR_PROGRESS_PREFIX).strip()):
+                messages.append(f"{body[:1000]}\n")
+    return messages
+
+
 def _with_live_output(args: list[str]) -> list[str]:
-    if not args or Path(args[0]).name.lower() not in {"agent", "agent.exe"}:
+    if not args or not is_cursor_cli(args[0]):
         return args
     rewritten: list[str] = []
     skip = False

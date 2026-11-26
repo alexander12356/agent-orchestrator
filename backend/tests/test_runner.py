@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import sys
 from pathlib import Path
@@ -141,6 +142,53 @@ def test_live_log_publishes_agent_updates_before_the_cli_exits(monkeypatch, tmp_
     assert logged == ["Проверяю контракт.\n", "Контракт соблюдён.\n"]
     assert "internal text" in result.output
     assert not list(tmp_path.glob(".orchestrator-progress-*"))
+
+
+def test_cursor_progress_is_published_once_before_cli_exit(monkeypatch, tmp_path):
+    public = "Прогресс: Проверяю исходники."
+    assistant = {
+        "type": "assistant",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": public}]},
+    }
+    events = [
+        {"type": "thinking", "text": "Прогресс: Скрытый текст"},
+        {"type": "tool_call", "tool_call": {"result": "Прогресс: Содержимое файла"}},
+        {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Итог."}]}},
+        {**assistant, "timestamp_ms": 1},
+        {**assistant, "timestamp_ms": 1, "model_call_id": "turn"},
+        {"type": "result", "result": public, "usage": {"inputTokens": 10, "outputTokens": 2}},
+    ]
+    script = tmp_path / "cursor.py"
+    script.write_text(
+        "import json, sys, time\n"
+        "from pathlib import Path\n"
+        "events = json.loads(sys.argv[1])\n"
+        "for event in events[:-1]:\n"
+        "    print(json.dumps(event), flush=True)\n"
+        "for _ in range(50):\n"
+        "    if Path('published').exists():\n"
+        "        break\n"
+        "    time.sleep(0.1)\n"
+        "else:\n"
+        "    sys.exit(1)\n"
+        "print(json.dumps(events[-1]))\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("app.runner.build_command", lambda *args: [sys.executable, str(script), json.dumps(events)])
+    prompts, logged = [], []
+
+    async def log(text: str) -> None:
+        logged.append(text)
+        (tmp_path / "published").touch()
+
+    runner = ProcessRunner(log_callback=log, on_prompt_sent=prompts.append)
+    result = asyncio.run(runner.run({"cli": "custom", "command": "agent --print {prompt}"}, "prompt", tmp_path, {}, 1))
+
+    assert result.exit_code == 0
+    assert logged == ["Проверяю исходники.\n"]
+    assert (result.input_tokens, result.output_tokens) == (10, 2)
+    assert "Прогресс:" in prompts[0]
+    assert "updates.txt" not in prompts[0]
 
 
 def test_extract_cursor_usage_names():
