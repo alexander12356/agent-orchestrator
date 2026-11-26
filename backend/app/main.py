@@ -446,30 +446,27 @@ def verify_signature(secret: str, body: bytes, signature: str | None) -> None:
 
 
 @app.post("/api/webhooks/git")
-async def git_webhook(request: Request, x_hub_signature_256: str | None = Header(None), x_github_event: str | None = Header(None)) -> dict[str, Any]:
-    return await handle_git_webhook(request, x_hub_signature_256, x_github_event, cleanup_worktree=True)
-
-
 @app.post("/api/webhooks/git/paperclip", include_in_schema=False)
-async def paperclip_git_webhook(request: Request, x_hub_signature_256: str | None = Header(None), x_github_event: str | None = Header(None)) -> dict[str, Any]:
-    return await handle_git_webhook(request, x_hub_signature_256, x_github_event, cleanup_worktree=False)
-
-
-async def handle_git_webhook(request: Request, signature: str | None, event: str | None, *, cleanup_worktree: bool) -> dict[str, Any]:
+async def git_webhook(request: Request, x_hub_signature_256: str | None = Header(None), x_github_event: str | None = Header(None)) -> dict[str, Any]:
     body = await request.body()
     saved = integration_settings()
-    verify_signature(saved.get("git_webhook_secret") or settings.git_webhook_secret, body, signature)
+    verify_signature(saved.get("git_webhook_secret") or settings.git_webhook_secret, body, x_hub_signature_256)
     payload = await request.json()
     pr = payload.get("pull_request", {})
-    if event not in (None, "pull_request") or not pr.get("merged") or pr.get("base", {}).get("ref") != "main":
+    if x_github_event not in (None, "pull_request") or not pr.get("merged") or pr.get("base", {}).get("ref") != "main":
         return {"accepted": False}
-    branch = pr.get("head", {}).get("ref", "")
+    head = pr.get("head", {})
+    branch = head.get("ref", "")
     url = pr.get("html_url")
     with connect() as conn:
-        row = conn.execute("SELECT id FROM tasks WHERE branch_name=? OR pr_url=?", (branch, url)).fetchone()
+        row = conn.execute(
+            "SELECT id FROM tasks WHERE pr_url=? OR (branch_name=? AND (pr_url IS NULL OR ? IS NULL)) "
+            "ORDER BY pr_url=? DESC LIMIT 1",
+            (url, branch, url, url),
+        ).fetchone()
     if not row:
         return {"accepted": False}
-    await dispatcher.merged(row["id"], url, cleanup_worktree=cleanup_worktree)
+    await dispatcher.merged(row["id"], url, head.get("sha"))
     return {"accepted": True, "task_id": row["id"]}
 
 
@@ -528,6 +525,7 @@ async def worker_socket(websocket: WebSocket, authorization: str | None = Header
     await websocket.accept()
     await hub.connect(websocket)
     try:
+        await dispatcher.send_pending_cleanup()
         await dispatcher.schedule()
         while True:
             message = await websocket.receive_json()
@@ -569,6 +567,8 @@ async def worker_socket(websocket: WebSocket, authorization: str | None = Header
                 await dispatcher.worker_completed(message)
             elif kind == "TASK_FAILED":
                 await dispatcher.worker_failed(message)
+            elif kind == "WORKTREE_CLEANED":
+                dispatcher.worktree_cleaned(message)
             elif kind == "HEARTBEAT":
                 await websocket.send_json({"type": "HEARTBEAT", "time": now()})
     except WebSocketDisconnect:

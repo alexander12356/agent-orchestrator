@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     retry_count INTEGER NOT NULL DEFAULT 0,
     stage_agents TEXT NOT NULL DEFAULT '{}',
     worktree_path TEXT,
+    cleanup_pending INTEGER NOT NULL DEFAULT 0,
+    cleanup_head TEXT,
     repository_url TEXT,
     auto_retries INTEGER NOT NULL DEFAULT 0,
     doc_returns INTEGER NOT NULL DEFAULT 0,
@@ -131,6 +133,8 @@ def init_db() -> None:
                 conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} TEXT")
         for column, definition in (
             ("single_stage", "INTEGER NOT NULL DEFAULT 0"),
+            ("cleanup_pending", "INTEGER NOT NULL DEFAULT 0"),
+            ("cleanup_head", "TEXT"),
             ("auto_retries", "INTEGER NOT NULL DEFAULT 0"),
             ("doc_returns", "INTEGER NOT NULL DEFAULT 0"),
             ("code_returns", "INTEGER NOT NULL DEFAULT 0"),

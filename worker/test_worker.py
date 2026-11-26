@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -63,6 +64,47 @@ def make_worker(tmp_path):
         library=str(tmp_path / 'reference-library'), unity=None,
     ))
     return worker
+
+
+def test_merge_cleanup_removes_git_worktree_and_both_branches(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    origin = tmp_path / "origin.git"
+
+    def git(*args):
+        return subprocess.check_output(["git", *args], cwd=repo, text=True, stderr=subprocess.STDOUT).strip()
+
+    git("init", "--bare", str(origin))
+    git("init", "-b", "main")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "initial")
+    git("remote", "add", "origin", str(origin))
+    worker = make_worker(tmp_path)
+    worker.repo = repo
+    path = worker.worktrees / "task-23"
+    branch = "Agent-Orchestrator/ZEL-23"
+    git("worktree", "add", "-b", branch, str(path))
+    git("push", "origin", branch)
+    message = {"task_id": 23, "worktree_path": str(path), "branch_name": branch, "head_sha": git("rev-parse", branch)}
+
+    draft = path / "draft.txt"
+    draft.write_text("local edits", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="незакоммиченные изменения"):
+        asyncio.run(worker.cleanup(message))
+    assert draft.exists()
+    assert git("ls-remote", "--heads", "origin", branch)
+
+    draft.unlink()
+    with pytest.raises(RuntimeError, match="изменилась после merge"):
+        asyncio.run(worker.cleanup({**message, "head_sha": "a" * 40}))
+    assert path.exists()
+    assert git("ls-remote", "--heads", "origin", branch)
+
+    asyncio.run(worker.cleanup(message))
+    asyncio.run(worker.cleanup(message))
+    assert not path.exists()
+    assert "ZEL-23" not in git("worktree", "list")
+    assert not git("branch", "--list", branch)
+    assert not git("ls-remote", "--heads", "origin", branch)
 
 
 def test_unity_command_uses_windows_project_and_log_paths(tmp_path):

@@ -36,6 +36,7 @@ KIMI_NODE = Path("/mnt/c/Program Files/nodejs/node.exe")
 KIMI_ENTRY = Path("/mnt/e/WSL/ZelyaKimiWindows/node_modules/@moonshot-ai/kimi-code/dist/main.mjs")
 ZCODE_NODE = Path("/mnt/c/Program Files/nodejs/node.exe")
 PR_DETAILS_FILE = "orchestrator-pr.json"
+TASK_BRANCH = re.compile(r"(?:Agent-Orchestrator/(?:[A-Za-z0-9]+-\d+|task-\d+)|feat/task-\d+)")
 PR_DETAILS_CONTRACT = (
     '{"purpose": string, "changes": string[], "implementation": string[], '
     '"before": string, "after": string, "validation": string[], "review_focus": string[]}'
@@ -233,7 +234,7 @@ class UnityWorker:
 
     async def prepare_worktree(self, task_id: int, branch: str) -> Path:
         # feat/task-N is kept for tasks whose branch was created under the old naming.
-        if not re.fullmatch(r"(?:Agent-Orchestrator/(?:[A-Za-z0-9]+-\d+|task-\d+)|feat/task-\d+)", branch):
+        if not TASK_BRANCH.fullmatch(branch):
             raise ValueError("Некорректное имя ветки")
         path = self.worktrees / f"task-{task_id}"
         await self.checked(["git", "fetch", "origin", "main"], self.repo)
@@ -675,14 +676,57 @@ class UnityWorker:
 
     async def cleanup(self, message: dict[str, Any]) -> None:
         task_id = int(message["task_id"])
-        path = Path(message.get("worktree_path") or self.worktrees / f"task-{task_id}").resolve()
-        if path.parent != self.worktrees:
-            raise ValueError("Worktree находится вне разрешенной директории")
+        branch = message["branch_name"]
+        path = self.worktrees / f"task-{task_id}"
+        saved_path = message.get("worktree_path")
+        if path.resolve() != path or (saved_path and Path(saved_path).resolve() != path):
+            raise ValueError("Путь worktree не соответствует задаче")
+        if not TASK_BRANCH.fullmatch(branch):
+            raise ValueError("Некорректное имя ветки")
+        if task_id in self.jobs and not self.jobs[task_id].done():
+            raise RuntimeError("Задача ещё выполняется")
+
+        branch_ref = f"refs/heads/{branch}"
+        worktrees = await self.checked(["git", "worktree", "list", "--porcelain", "-z"], self.repo)
+        registered = False
+        for record in worktrees.split("\0\0"):
+            location, _, details = record.partition("\0")
+            if not location.startswith("worktree "):
+                continue
+            same_path = Path(location.removeprefix("worktree ")).resolve() == path
+            same_branch = f"branch {branch_ref}" in details.split("\0")
+            if same_path:
+                if not same_branch:
+                    raise ValueError("Ветка worktree не соответствует задаче")
+                registered = True
+            elif same_branch:
+                raise ValueError("Ветка задачи используется в другом worktree")
         if path.exists():
+            if not registered:
+                raise ValueError("Каталог задачи не зарегистрирован как Git worktree")
+            status = await self.checked(["git", "status", "--porcelain", "--untracked-files=all"], path)
+            if status:
+                raise RuntimeError("В worktree есть незакоммиченные изменения")
+
+        local_code, local_head = await self.execute(["git", "rev-parse", "--verify", "--quiet", branch_ref], self.repo)
+        if local_code not in (0, 1):
+            raise RuntimeError(f"Не удалось проверить локальную ветку {branch}")
+        merged_head = message.get("head_sha") or local_head.strip()
+        if not local_code and local_head.strip() != merged_head:
+            raise RuntimeError(f"Локальная ветка {branch} изменилась после merge")
+        remote_head = await self.checked(["git", "ls-remote", "--heads", "origin", branch_ref], self.repo)
+        if remote_head:
+            if remote_head.split()[0] != merged_head:
+                raise RuntimeError(f"Удалённая ветка {branch} отличается от влитой")
+            await self.checked(
+                ["git", "push", f"--force-with-lease={branch_ref}:{merged_head}", "origin", "--delete", branch],
+                self.repo,
+            )
+        if registered:
             await self.checked(["git", "worktree", "remove", "--force", str(path)], self.repo)
-        (self.worktrees / f'.task-{int(message["task_id"])}-publication.json').unlink(missing_ok=True)
-        await self.execute(["git", "branch", "-D", message["branch_name"]], self.repo)
-        await self.execute(["git", "push", "origin", "--delete", message["branch_name"]], self.repo)
+        if not local_code:
+            await self.checked(["git", "branch", "-D", branch], self.repo)
+        (self.worktrees / f".task-{task_id}-publication.json").unlink(missing_ok=True)
 
     async def heartbeat(self) -> None:
         while True:
@@ -710,7 +754,12 @@ class UnityWorker:
                     elif message.get("type") == "CANCEL_TASK":
                         await self.cancel(int(message["task_id"]))
                     elif message.get("type") == "CLEANUP_WORKTREE":
-                        await self.cleanup(message)
+                        try:
+                            await self.cleanup(message)
+                        except (OSError, RuntimeError, ValueError) as exc:
+                            await self.log(int(message["task_id"]), f"Не удалось очистить worktree: {exc}\n")
+                        else:
+                            await self.send({**message, "type": "WORKTREE_CLEANED"})
             finally:
                 heartbeat.cancel()
                 running = list(self.jobs.values())

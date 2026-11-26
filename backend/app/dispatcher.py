@@ -1029,12 +1029,43 @@ class Dispatcher:
         await self.start(task_id)
         self.queue_decision_notification(task_id, status)
 
-    async def merged(self, task_id: int, pr_url: str | None = None, *, cleanup_worktree: bool = True) -> None:
+    async def send_pending_cleanup(self, task_id: int | None = None) -> None:
+        with connect() as conn:
+            pending = conn.execute(
+                "SELECT id, branch_name, worktree_path, cleanup_head FROM tasks "
+                "WHERE cleanup_pending=1 AND (? IS NULL OR id=?) ORDER BY id",
+                (task_id, task_id),
+            ).fetchall()
+        for task in pending:
+            message = {
+                "type": "CLEANUP_WORKTREE",
+                "task_id": task["id"],
+                "branch_name": task["branch_name"],
+                "worktree_path": task["worktree_path"],
+            }
+            if task["cleanup_head"]:
+                message["head_sha"] = task["cleanup_head"]
+            if not await hub.send(message):
+                break
+
+    def worktree_cleaned(self, message: dict[str, Any]) -> None:
+        with connect() as conn:
+            conn.execute(
+                "UPDATE tasks SET cleanup_pending=0, cleanup_head=NULL, worktree_path=NULL "
+                "WHERE id=? AND cleanup_pending=1 AND branch_name=? AND worktree_path=? AND cleanup_head IS ?",
+                (message.get("task_id"), message.get("branch_name"), message.get("worktree_path"), message.get("head_sha")),
+            )
+
+    async def merged(self, task_id: int, pr_url: str | None = None, head_sha: str | None = None) -> None:
         with transaction() as conn:
-            task = conn.execute("SELECT worktree_path, branch_name FROM tasks WHERE id=?", (task_id,)).fetchone()
-            if not task:
+            updated = conn.execute(
+                "UPDATE tasks SET current_stage=6, status='done', merged_to_main=1, "
+                "pr_url=COALESCE(?, pr_url), cleanup_pending=(worktree_path IS NOT NULL), "
+                "cleanup_head=CASE WHEN worktree_path IS NOT NULL THEN COALESCE(?, cleanup_head) END, updated_at=? WHERE id=?",
+                (pr_url, head_sha, now(), task_id),
+            )
+            if not updated.rowcount:
                 raise ValueError("Задача не найдена")
-            conn.execute("UPDATE tasks SET current_stage=6, status='done', merged_to_main=1, pr_url=COALESCE(?, pr_url), updated_at=? WHERE id=?", (pr_url, now(), task_id))
             children = conn.execute("SELECT task_id FROM task_dependencies WHERE depends_on_task_id=?", (task_id,)).fetchall()
             for child in children:
                 blocked = conn.execute(
@@ -1043,8 +1074,7 @@ class Dispatcher:
                 ).fetchone()["n"]
                 if not blocked:
                     conn.execute("UPDATE tasks SET current_stage=1, status='queued', updated_at=? WHERE id=? AND current_stage=0", (now(), child["task_id"]))
-        if cleanup_worktree:
-            await hub.send({"type": "CLEANUP_WORKTREE", "task_id": task_id, "branch_name": task["branch_name"], "worktree_path": task["worktree_path"]})
+        await self.send_pending_cleanup(task_id)
         await self.schedule()
 
 
