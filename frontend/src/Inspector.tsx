@@ -1,37 +1,51 @@
 import TokenUsage from './TokenUsage';
 import { Check, ExternalLink, Flame, FolderGit2, Hand, Pause, Play, RotateCcw, Send, TerminalSquare } from 'lucide-react';
-import { memo, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import TaskDescription from './TaskDescription';
 import Markdown from './Markdown';
 import { api, canPausePipeline, canStartPipeline, fmtTokens, spentTokens, stageName } from './api';
-import { latestDocumentArtifact } from './graphUtils';
+import { artifactUrl } from './ArtifactPage';
 import { Artifact, Task } from './types';
 
-export type InspectorTab = 'description' | 'stage' | 'document';
+export type InspectorTab = 'description' | 'stage';
 
-const DocumentView = memo(function DocumentView({ name, content }: { name?: string; content: string }) {
-  return <section><div className="mb-3 flex items-center justify-between"><h3 className="text-xs font-medium text-slate-300">Последняя ревизия документации</h3>{name && <span className="text-[10px] text-slate-600">{name}</span>}</div><div className="card min-h-48 p-4">{name ? <div className="markdown text-xs leading-5 text-slate-400"><Markdown text={content}/></div> : <p className="py-8 text-center text-[11px] text-slate-600">Документация еще не создана</p>}</div></section>;
-});
-
-export default function Inspector({ task, stage, requestedArtifact: _requestedArtifact = '', tab, onTabChange, reload, notify }: { task: Task; stage: number; requestedArtifact?: string; tab: InspectorTab; onTabChange: (tab: InspectorTab) => void; reload: () => void; notify: (message: string) => void }) {
+export default function Inspector({ task, stage, tab, onTabChange, reload, notify }: { task: Task; stage: number; tab: InspectorTab; onTabChange: (tab: InspectorTab) => void; reload: () => void; notify: (message: string) => void }) {
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
-  const [documentContent, setDocumentContent] = useState('');
   const [chatContent, setChatContent] = useState('');
   const [answer, setAnswer] = useState('');
   const [logs, setLogs] = useState('');
   const [busy, setBusy] = useState(false);
   const logRef = useRef<HTMLPreElement>(null);
-  const document = latestDocumentArtifact(artifacts);
   const chat = artifacts.find(artifact => artifact.name === '00_yougile_chat.md');
+  const lastSent = task.runs?.slice().reverse().find(run => run.sent_prompt != null);
   const runsKey = (task.runs || []).map(run => `${run.id}:${run.status}:${run.attempt}`).join(',');
-  useEffect(() => { api<Artifact[]>(`/tasks/${task.id}/artifacts`).then(setArtifacts).catch(() => setArtifacts([])); }, [task.id, task.status, runsKey]);
   useEffect(() => {
-    if (!document) { setDocumentContent(''); return; }
-    fetch(`/api/tasks/${task.id}/artifacts/${document.name}`).then(response => response.text()).then(setDocumentContent);
-  }, [task.id, document?.name]);
+    if (tab !== 'description') return;
+    const controller = new AbortController();
+    let timer: number | undefined;
+    const load = async () => {
+      try {
+        const list = await api<Artifact[]>(`/tasks/${task.id}/artifacts`, { signal: controller.signal });
+        if (!controller.signal.aborted) setArtifacts(list);
+      } catch {
+        if (controller.signal.aborted) return;
+      }
+      if (!controller.signal.aborted && task.status === 'running') timer = window.setTimeout(load, 2500);
+    };
+    void load();
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [task.id, task.status, runsKey, tab]);
   useEffect(() => {
     if (!chat) { setChatContent(''); return; }
-    fetch(`/api/tasks/${task.id}/artifacts/${chat.name}`).then(response => response.text()).then(setChatContent);
+    const controller = new AbortController();
+    fetch(`/api/tasks/${task.id}/artifacts/${chat.name}`, { signal: controller.signal })
+      .then(response => response.ok ? response.text() : '')
+      .then(content => { if (!controller.signal.aborted) setChatContent(content); })
+      .catch(() => { if (!controller.signal.aborted) setChatContent(''); });
+    return () => controller.abort();
   }, [task.id, chat?.name]);
   useEffect(() => {
     setLogs('');
@@ -71,10 +85,29 @@ export default function Inspector({ task, stage, requestedArtifact: _requestedAr
     {pipelineAvailable && <button disabled={busy || !task.stage_agents[nextStage]} title={task.stage_agents[nextStage] ? undefined : `Назначьте бота на этап ${nextStage}`} className="btn btn-primary mb-3 w-full" onClick={() => action('pipeline')}><Play size={14}/>Запустить пайплайн</button>}
     {canPausePipeline(task) && <button disabled={busy} title="При продолжении текущий этап запустится новой попыткой" className="btn mb-3 w-full" onClick={() => action('pause')}><Pause size={14}/>Приостановить</button>}
     {task.status === 'paused' && <div className="mb-3 space-y-2"><p className="text-xs text-amber-300">На паузе · этап {task.current_stage}</p><button disabled={busy || !task.stage_agents[nextStage]} title={task.stage_agents[nextStage] ? undefined : `Назначьте бота на этап ${nextStage}`} className="btn btn-primary w-full" onClick={() => action('resume')}><Play size={14}/>Продолжить</button></div>}
-    <div className="mb-5 flex border-b border-slate-800" role="tablist" aria-label="Инспектор задачи">{([['description', 'Описание'], ['stage', 'Этап'], ['document', 'Документ']] as [InspectorTab, string][]).map(([id, title]) => <button key={id} role="tab" aria-selected={tab === id} onClick={() => onTabChange(id)} className={`-mb-px border-b-2 px-3 py-2 text-xs transition ${tab === id ? 'border-indigo-400 text-indigo-300' : 'border-transparent text-slate-500 hover:text-slate-300'}`}>{title}</button>)}</div>
+    <div className="mb-5 flex border-b border-slate-800" role="tablist" aria-label="Инспектор задачи">{([['description', 'Описание'], ['stage', 'Этап']] as const).map(([id, title]) => <button key={id} role="tab" aria-selected={tab === id} onClick={() => onTabChange(id)} className={`-mb-px border-b-2 px-3 py-2 text-xs transition ${tab === id ? 'border-indigo-400 text-indigo-300' : 'border-transparent text-slate-500 hover:text-slate-300'}`}>{title}</button>)}</div>
     {task.status === 'needs_human' && <section className="mb-5 rounded-lg border border-amber-700/60 bg-amber-950/30 p-3 text-xs"><div className="flex items-start gap-2 text-amber-200"><Hand size={15} className="mt-0.5 shrink-0"/><div><b>Нужно решение человека</b>{task.hold_reason && <p className="mt-1 text-amber-200/80">{task.hold_reason}</p>}</div></div><button disabled={busy} className="btn btn-primary mt-3 w-full" onClick={() => action('resume')}><Play size={14}/>Продолжить</button></section>}
-    {tab === 'description' && <div><TaskDescription task={task}/><section><h3 className="mb-3 text-xs font-medium text-slate-300">Чат Yougile</h3>{chat ? <div className="markdown text-xs leading-5 text-slate-400"><Markdown text={chatContent}/></div> : <p className="text-[11px] text-slate-600">Чат не импортирован</p>}</section></div>}
-    {tab === 'document' && <DocumentView name={document?.name} content={documentContent}/>}
+    {tab === 'description' && <>
+      <TaskDescription task={task}/>
+      <section className="mb-5">
+        <h3 className="mb-2 text-xs font-medium text-slate-300">Последний отправленный промпт</h3>
+        {lastSent ? <>
+          <p className="mb-2 text-[11px] text-slate-500">{stageName(lastSent.stage)} · попытка {lastSent.attempt}</p>
+          <pre className="scrollbar max-h-80 overflow-auto whitespace-pre-wrap break-words rounded-lg border border-slate-800 bg-slate-950/50 p-3 text-[11px] leading-relaxed text-slate-300">{lastSent.sent_prompt}</pre>
+        </> : <p className="text-[11px] text-slate-600">Отправленный промпт пока недоступен</p>}
+      </section>
+      <section className="mb-5">
+        <h3 className="mb-2 text-xs font-medium text-slate-300">Артефакты</h3>
+        {artifacts.length ? <ul className="space-y-2">
+          {artifacts.map(({ name }) => <li key={name}>
+            <a className="flex items-center gap-2 break-all text-xs text-indigo-300 hover:underline" href={artifactUrl(task.id, name)} target="_blank" rel="noopener noreferrer">
+              <ExternalLink size={13} className="shrink-0" aria-hidden="true"/>{name}
+            </a>
+          </li>)}
+        </ul> : <p className="text-[11px] text-slate-600">Артефактов пока нет</p>}
+      </section>
+      <section><h3 className="mb-3 text-xs font-medium text-slate-300">Чат Yougile</h3>{chat ? <div className="markdown text-xs leading-5 text-slate-400"><Markdown text={chatContent}/></div> : <p className="text-[11px] text-slate-600">Чат не импортирован</p>}</section>
+    </>}
     {tab === 'stage' && <>
       <div className="mb-5"><div className="mb-1 text-[10px] uppercase tracking-widest text-indigo-400">Инспектор · этап {stage}</div><h2 className="text-base font-semibold">{stageName(stage)}</h2></div>
       <section className="mb-5 space-y-2 text-[11px]">

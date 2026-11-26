@@ -593,6 +593,13 @@ class Dispatcher:
         result: RunResult | None = None
         success = False
         validation_error = None
+        def record_prompt(prompt: str) -> None:
+            with connect() as conn:
+                conn.execute(
+                    "UPDATE stage_runs SET sent_prompt=? WHERE id=? AND status='running'",
+                    (prompt, run_id),
+                )
+
         configs = [agent["primary_config"], *agent["fallback_configs"]]
         with contextlib.ExitStack() as stack:
             draft = None
@@ -619,7 +626,7 @@ class Dispatcher:
                     )
                 if index:
                     await log(f"Fallback: {config['cli']} {config.get('model', '')}\n")
-                runner = ProcessRunner(log_callback=log, on_process=register_process)
+                runner = ProcessRunner(log_callback=log, on_process=register_process, on_prompt_sent=record_prompt)
                 result = await runner.run(
                     config, prompt, directory, env, agent["fallback_triggers"].get("timeout_minutes", 20),
                 )

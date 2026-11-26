@@ -546,6 +546,15 @@ async def worker_socket(websocket: WebSocket, authorization: str | None = Header
                         "WHERE id=? AND task_id=? AND stage=3 AND status='running'",
                         (cli, model, int(bool(message.get("is_fallback"))), message.get("run_id"), message.get("task_id")),
                     )
+            elif kind == "TASK_PROMPT":
+                prompt = message.get("prompt")
+                if not isinstance(prompt, str):
+                    continue
+                with connect() as conn:
+                    conn.execute(
+                        "UPDATE stage_runs SET sent_prompt=? WHERE id=? AND task_id=? AND stage=3 AND status='running'",
+                        (prompt, message.get("run_id"), message.get("task_id")),
+                    )
             elif kind == "TASK_USAGE":
                 counts = tuple(message.get(key) for key in ("input_tokens", "cache_tokens", "output_tokens"))
                 if any(type(count) is not int or not 0 <= count < 2**63 for count in counts):

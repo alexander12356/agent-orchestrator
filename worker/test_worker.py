@@ -214,7 +214,7 @@ def fallback_worker(tmp_path, answers):
     worker.logs = []
     calls = []
 
-    async def run_agent(task_id, path, config, prompt, timeout):
+    async def run_agent(task_id, path, config, prompt, timeout, run_id=None):
         calls.append(config)
         answer = answers[len(calls) - 1]
         if isinstance(answer, Exception):
@@ -286,7 +286,7 @@ def test_limit_is_reported_only_by_error_lines():
     assert not module.rate_limited_line('{"type":"assistant","message":{"content":[{"type":"text","text":"rate limit"}]}}')
 
 
-def run_cli(tmp_path, body, messages=None):
+def run_cli(tmp_path, body, messages=None, run_id=None):
     worker = make_worker(tmp_path)
     script = tmp_path / 'cli.py'
     script.write_text('import sys, time\n' + body, encoding='utf-8')
@@ -296,7 +296,16 @@ def run_cli(tmp_path, body, messages=None):
 
     worker.send = send
     config = {'cli': 'custom', 'command': f'"{sys.executable}" "{script}"'}
-    return asyncio.run(worker.run_agent(1, tmp_path, config, 'implement', 1))
+    return asyncio.run(worker.run_agent(1, tmp_path, config, 'implement', 1, run_id))
+
+
+def test_worker_reports_the_prompt_passed_to_cli(tmp_path):
+    messages = []
+    result = run_cli(tmp_path, "sys.stdout.write(sys.argv[1])\n", messages, run_id=7)
+
+    assert result['exit_code'] == 0
+    assert messages == [{'type': 'TASK_PROMPT', 'task_id': 1, 'run_id': 7, 'prompt': result['output']}]
+    assert result['output'].startswith('implement\n\nДля Live Logs')
 
 
 def test_run_agent_reads_long_lines_and_ignores_limit_words_in_prose(tmp_path):

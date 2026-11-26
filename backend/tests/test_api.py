@@ -21,7 +21,7 @@ def test_agent_and_task_crud(client, agent):
     assert (settings.storage_dir / 'tasks' / str(task['id']) / '00_task.md').exists()
 
 
-def test_worker_reports_model_while_stage_is_running(client):
+def test_worker_reports_model_and_prompt_while_stage_is_running(client):
     response = client.post('/api/tasks', json={'title': 'Worker task', 'stage_agents': {}})
     assert response.status_code == 201
     task = response.json()
@@ -37,11 +37,16 @@ def test_worker_reports_model_while_stage_is_running(client):
             'type': 'TASK_MODEL', 'task_id': task['id'], 'run_id': run_id,
             'cli_used': 'zcode', 'model_used': 'account:zai/GLM-5.4', 'is_fallback': True,
         })
+        worker.send_json({
+            'type': 'TASK_PROMPT', 'task_id': task['id'], 'run_id': run_id,
+            'prompt': 'Точный текст\nпромпта',
+        })
         worker.send_json({'type': 'HEARTBEAT'})
         assert worker.receive_json()['type'] == 'HEARTBEAT'
 
     run = client.get(f"/api/tasks/{task['id']}").json()['runs'][0]
     assert (run['status'], run['cli_used'], run['model_used'], run['is_fallback']) == ('running', 'zcode', 'account:zai/GLM-5.4', 1)
+    assert run['sent_prompt'] == 'Точный текст\nпромпта'
 
 
 def test_task_without_agent_assignment_does_not_get_default_agent(client, agent):

@@ -38,7 +38,7 @@ def fake_runner(monkeypatch, outcomes):
     prompts = []
 
     class FakeRunner:
-        def __init__(self, log_callback=None, on_process=None, rate_limit_callback=None):
+        def __init__(self, log_callback=None, on_process=None, rate_limit_callback=None, on_prompt_sent=None):
             pass
 
         async def run(self, config, prompt, cwd, env, timeout_minutes):

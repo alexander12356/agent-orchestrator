@@ -366,14 +366,14 @@ class UnityWorker:
             with suppress(asyncio.CancelledError):
                 await consumer
 
-    async def run_agent(self, task_id: int, path: Path, config: dict[str, Any], prompt: str, timeout: int) -> dict[str, Any]:
+    async def run_agent(self, task_id: int, path: Path, config: dict[str, Any], prompt: str, timeout: int, run_id: int | None = None) -> dict[str, Any]:
         async def publish(text: str) -> None:
             await self.log(task_id, text)
 
         async with progress_prompt(prompt, path, publish) as prompt:
-            return await self._run_cli(task_id, path, config, prompt, timeout)
+            return await self._run_cli(task_id, path, config, prompt, timeout, run_id)
 
-    async def _run_cli(self, task_id: int, path: Path, config: dict[str, Any], prompt: str, timeout: int) -> dict[str, Any]:
+    async def _run_cli(self, task_id: int, path: Path, config: dict[str, Any], prompt: str, timeout: int, run_id: int | None) -> dict[str, Any]:
         command = self.command(config, prompt, path)
         env = os.environ.copy()
         if config.get("cli") == "kimi":
@@ -411,6 +411,8 @@ class UnityWorker:
         consumer = asyncio.create_task(consume())
         timed_out = False
         try:
+            if run_id is not None:
+                await self.send({"type": "TASK_PROMPT", "task_id": task_id, "run_id": run_id, "prompt": prompt})
             try:
                 await asyncio.wait_for(process.wait(), timeout * 60)
             except TimeoutError:
@@ -468,7 +470,7 @@ class UnityWorker:
             if index:
                 await self.log(task_id, f"Fallback: {label} — запуск\n")
             try:
-                result = await self.run_agent(task_id, path, candidate, prompt, timeout)
+                result = await self.run_agent(task_id, path, candidate, prompt, timeout, run_id)
             except Exception as exc:
                 partial = True
                 failures.append(f"{label}: {exc}")

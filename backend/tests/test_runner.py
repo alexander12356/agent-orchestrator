@@ -120,15 +120,24 @@ def test_live_log_publishes_agent_updates_before_the_cli_exits(monkeypatch, tmp_
         "    file.write('Контракт соблюдён.')\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr("app.runner.build_command", lambda config, prompt, *args: [sys.executable, str(script), prompt])
+    launched_prompts = []
+
+    def command(config, prompt, *args):
+        launched_prompts.append(prompt)
+        return [sys.executable, str(script), prompt]
+
+    monkeypatch.setattr("app.runner.build_command", command)
     logged = []
+    sent_prompts = []
 
     async def log(text: str) -> None:
         logged.append(text)
         (tmp_path / "published").touch()
 
-    result = asyncio.run(ProcessRunner(log_callback=log).run({"cli": "custom"}, "prompt", tmp_path, {}, 1))
+    runner = ProcessRunner(log_callback=log, on_prompt_sent=sent_prompts.append)
+    result = asyncio.run(runner.run({"cli": "custom"}, "prompt", tmp_path, {}, 1))
     assert result.exit_code == 0
+    assert sent_prompts == launched_prompts
     assert logged == ["Проверяю контракт.\n", "Контракт соблюдён.\n"]
     assert "internal text" in result.output
     assert not list(tmp_path.glob(".orchestrator-progress-*"))

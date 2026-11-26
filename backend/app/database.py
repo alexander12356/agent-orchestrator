@@ -65,6 +65,7 @@ CREATE TABLE IF NOT EXISTS stage_runs (
     agent_id INTEGER REFERENCES agents(id),
     cli_used TEXT,
     model_used TEXT,
+    sent_prompt TEXT,
     is_fallback INTEGER NOT NULL DEFAULT 0,
     artifact_path TEXT,
     reviewed_document TEXT,
@@ -143,6 +144,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE stage_runs ADD COLUMN yougile_question_message_id INTEGER")
         if "reviewed_document" not in run_columns:
             conn.execute("ALTER TABLE stage_runs ADD COLUMN reviewed_document TEXT")
+        if "sent_prompt" not in run_columns:
+            conn.execute("ALTER TABLE stage_runs ADD COLUMN sent_prompt TEXT")
         if "usage_partial" not in run_columns:
             conn.execute("ALTER TABLE stage_runs ADD COLUMN usage_partial INTEGER NOT NULL DEFAULT 0")
             restore_usage(conn)

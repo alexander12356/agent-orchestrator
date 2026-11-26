@@ -55,6 +55,7 @@ class ProcessRunner:
     log_callback: Callable[[str], Awaitable[None]] | None = None
     rate_limit_callback: Callable[[], Awaitable[None]] | None = None
     on_process: Callable[[asyncio.subprocess.Process], None] | None = None
+    on_prompt_sent: Callable[[str], None] | None = None
 
     async def run(
         self,
@@ -129,6 +130,8 @@ class ProcessRunner:
 
         try:
             async with asyncio.timeout(timeout_minutes * 60):
+                if self.on_prompt_sent:
+                    self.on_prompt_sent(prompt)
                 await consume()
                 if not limited:
                     await process.wait()

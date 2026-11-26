@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api } from './api';
+import ArtifactPage from './ArtifactPage';
 import Inspector from './Inspector';
 import { Task } from './types';
 
@@ -15,7 +16,10 @@ vi.mock('mermaid', () => ({
 
 vi.mock('./api', async (importOriginal) => ({
   ...await importOriginal<typeof import('./api')>(),
-  api: vi.fn(async (path: string) => (String(path).includes('artifacts') ? [{ name: '01_tech_doc_v1.md', path: '/tmp/01_tech_doc_v1.md', size: 20 }] : {})),
+  api: vi.fn(async (path: string) => (path.endsWith('/artifacts') ? [
+    { name: '01_tech_doc_v1.md', path: '/tmp/01_tech_doc_v1.md', size: 20 },
+    { name: '02 review #1.json', path: '/tmp/02 review #1.json', size: 10 },
+  ] : {})),
   fmtTokens: (value: number) => String(value),
   spentTokens: (run: { input_tokens?: number; output_tokens?: number; cache_tokens?: number }) => (run.input_tokens || 0) + (run.output_tokens || 0) + (run.cache_tokens || 0),
   stageName: () => 'Тех. документация',
@@ -45,13 +49,33 @@ describe('Inspector', () => {
   });
 
   it('does not show the artifact on the stage tab', () => {
-    render(<Inspector {...props} tab="stage" requestedArtifact="01_tech_doc_v1.md" />);
+    render(<Inspector {...props} tab="stage" />);
     expect(screen.queryByRole('heading', { name: 'Артефакты' })).not.toBeInTheDocument();
     expect(screen.getByText('Live Logs')).toBeInTheDocument();
   });
 
-  it('renders a mermaid diagram on the document tab', async () => {
-    const { container } = render(<Inspector {...props} tab="document" />);
+  it('shows the last sent prompt and all artifact links in the description', async () => {
+    const run = { id: 2, task_id: 7, stage: 1, attempt: 2, sent_prompt: 'Отправленный текст', is_fallback: false, input_tokens: 0, output_tokens: 0, cache_tokens: 0, tokens_estimated: false, status: 'completed', started_at: task.created_at };
+    render(<Inspector {...props} task={{ ...task, runs: [
+      { ...run, id: 1, attempt: 1, sent_prompt: 'Предыдущий текст' },
+      run,
+      { ...run, id: 3, stage: 2, attempt: 1, status: 'running', sent_prompt: null },
+    ] }} tab="description" />);
+
+    expect(screen.getByText('Отправленный текст')).toBeInTheDocument();
+    expect(screen.queryByText('Предыдущий текст')).not.toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: 'Документ' })).not.toBeInTheDocument();
+
+    const document = await screen.findByRole('link', { name: '01_tech_doc_v1.md' });
+    expect(document).toHaveAttribute('target', '_blank');
+    expect(document).toHaveAttribute('href', '/artifact?task=7&name=01_tech_doc_v1.md');
+    const review = screen.getByRole('link', { name: '02 review #1.json' });
+    expect(review).toHaveAttribute('target', '_blank');
+    expect(review).toHaveAttribute('href', '/api/tasks/7/artifacts/02%20review%20%231.json');
+  });
+
+  it('renders a mermaid diagram in the standalone artifact page', async () => {
+    const { container } = render(<ArtifactPage taskId={7} name="01_tech_doc_v1.md" />);
     await waitFor(() => expect(container.querySelector('svg.flowchart')).toBeTruthy());
   });
 
