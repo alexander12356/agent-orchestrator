@@ -436,12 +436,21 @@ def verify_signature(secret: str, body: bytes, signature: str | None) -> None:
 
 @app.post("/api/webhooks/git")
 async def git_webhook(request: Request, x_hub_signature_256: str | None = Header(None), x_github_event: str | None = Header(None)) -> dict[str, Any]:
+    return await handle_git_webhook(request, x_hub_signature_256, x_github_event, cleanup_worktree=True)
+
+
+@app.post("/api/webhooks/git/paperclip", include_in_schema=False)
+async def paperclip_git_webhook(request: Request, x_hub_signature_256: str | None = Header(None), x_github_event: str | None = Header(None)) -> dict[str, Any]:
+    return await handle_git_webhook(request, x_hub_signature_256, x_github_event, cleanup_worktree=False)
+
+
+async def handle_git_webhook(request: Request, signature: str | None, event: str | None, *, cleanup_worktree: bool) -> dict[str, Any]:
     body = await request.body()
     saved = integration_settings()
-    verify_signature(saved.get("git_webhook_secret") or settings.git_webhook_secret, body, x_hub_signature_256)
+    verify_signature(saved.get("git_webhook_secret") or settings.git_webhook_secret, body, signature)
     payload = await request.json()
     pr = payload.get("pull_request", {})
-    if x_github_event not in (None, "pull_request") or not pr.get("merged") or pr.get("base", {}).get("ref") != "main":
+    if event not in (None, "pull_request") or not pr.get("merged") or pr.get("base", {}).get("ref") != "main":
         return {"accepted": False}
     branch = pr.get("head", {}).get("ref", "")
     url = pr.get("html_url")
@@ -449,7 +458,7 @@ async def git_webhook(request: Request, x_hub_signature_256: str | None = Header
         row = conn.execute("SELECT id FROM tasks WHERE branch_name=? OR pr_url=?", (branch, url)).fetchone()
     if not row:
         return {"accepted": False}
-    await dispatcher.merged(row["id"], url)
+    await dispatcher.merged(row["id"], url, cleanup_worktree=cleanup_worktree)
     return {"accepted": True, "task_id": row["id"]}
 
 

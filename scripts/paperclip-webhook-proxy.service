@@ -1,0 +1,17 @@
+[Unit]
+Description=Paperclip GitHub webhook proxy for Agent Orchestrator
+After=network.target zelya-paperclip.service
+
+[Service]
+WorkingDirectory=/root/projects/agent-orchestrator
+EnvironmentFile=/etc/paperclip-webhook-proxy.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/root/projects/agent-orchestrator/.venv/bin/uvicorn app.paperclip_webhook_proxy:app --app-dir backend --host 127.0.0.1 --port 3103 --no-access-log
+Restart=on-failure
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target
