@@ -460,6 +460,11 @@ class UnityWorker:
         failures: list[str] = []
         for index, candidate in enumerate(configs):
             label = self.config_label(candidate)
+            if run_id is not None:
+                await self.send({
+                    "type": "TASK_MODEL", "task_id": task_id, "run_id": run_id,
+                    "cli_used": candidate["cli"], "model_used": candidate.get("model", ""), "is_fallback": index > 0,
+                })
             if index:
                 await self.log(task_id, f"Fallback: {label} — запуск\n")
             try:

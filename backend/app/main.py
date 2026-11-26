@@ -536,6 +536,16 @@ async def worker_socket(websocket: WebSocket, authorization: str | None = Header
                 chunk = message.get("chunk")
                 if message.get("format") == "activity" and isinstance(chunk, str) and chunk.strip():
                     await bus.publish(int(message["task_id"]), 3, chunk)
+            elif kind == "TASK_MODEL":
+                cli, model = message.get("cli_used"), message.get("model_used")
+                if not isinstance(cli, str) or not isinstance(model, str):
+                    continue
+                with connect() as conn:
+                    conn.execute(
+                        "UPDATE stage_runs SET cli_used=?, model_used=?, is_fallback=? "
+                        "WHERE id=? AND task_id=? AND stage=3 AND status='running'",
+                        (cli, model, int(bool(message.get("is_fallback"))), message.get("run_id"), message.get("task_id")),
+                    )
             elif kind == "TASK_USAGE":
                 counts = tuple(message.get(key) for key in ("input_tokens", "cache_tokens", "output_tokens"))
                 if any(type(count) is not int or not 0 <= count < 2**63 for count in counts):

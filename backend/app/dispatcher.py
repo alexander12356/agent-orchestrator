@@ -612,6 +612,11 @@ class Dispatcher:
                 if draft:
                     shutil.copyfile(doc, draft)
                     draft_questions.unlink(missing_ok=True)
+                with connect() as conn:
+                    conn.execute(
+                        "UPDATE stage_runs SET cli_used=?, model_used=?, is_fallback=? WHERE id=? AND status='running'",
+                        (config["cli"], config.get("model", ""), int(index > 0), run_id),
+                    )
                 if index:
                     await log(f"Fallback: {config['cli']} {config.get('model', '')}\n")
                 runner = ProcessRunner(log_callback=log, on_process=register_process)
@@ -658,8 +663,8 @@ class Dispatcher:
         error = None if success else validation_error or describe_failure(result, artifact_name)
         with transaction() as conn:
             conn.execute(
-                "UPDATE stage_runs SET cli_used=?, model_used=?, is_fallback=?, artifact_path=?, status=?, finished_at=?, error=? WHERE id=?",
-                (config["cli"], config.get("model", ""), int(configs.index(config) > 0), str(artifact), status, now(), error, run_id),
+                "UPDATE stage_runs SET artifact_path=?, status=?, finished_at=?, error=? WHERE id=?",
+                (str(artifact), status, now(), error, run_id),
             )
         if not success:
             raise StageFailure(error, retryable=not result.timed_out and not result.rate_limited and result.exit_code != 127)

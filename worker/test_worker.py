@@ -240,8 +240,16 @@ ZCODE = {'cli': 'zcode', 'model': 'account:zai/GLM-5.4'}
 
 def test_failed_primary_switches_to_fallback(tmp_path):
     worker, calls = fallback_worker(tmp_path, [{**agent_result(1), "input_tokens": 5, "estimated": False}, {**agent_result(0), "input_tokens": 12, "estimated": False}])
-    selected, result = run_fallback(worker, {'primary': KIMI, 'fallback': [ZCODE]})
+    models = []
+
+    async def send(message):
+        if message['type'] == 'TASK_MODEL':
+            models.append((len(calls), message['model_used'], message['is_fallback']))
+
+    worker.send = send
+    selected, result = asyncio.run(worker.run_with_fallback(1, tmp_path, 'prompt', {'primary': KIMI, 'fallback': [ZCODE]}, {}, run_id=4))
     assert [call['cli'] for call in calls] == ['kimi', 'zcode']
+    assert models == [(0, KIMI['model'], False), (1, ZCODE['model'], True)]
     assert selected == ZCODE
     assert result['exit_code'] == 0
     assert result['input_tokens'] == 17

@@ -13,12 +13,13 @@ const titles = ['Тех. документация', 'Ревью документ
 const envs = ['VDS', 'VDS', 'Local Unity Worker', 'VDS', 'GitHub'];
 
 function StageNode({ data, selected }: NodeProps) {
-  const d = data as unknown as { title: string; env: string; agent?: Agent; active: boolean; held: boolean; status: string; tokens: number; done: boolean; fallback: boolean; human: boolean };
+  const d = data as unknown as { title: string; env: string; agent?: Agent; model?: string; active: boolean; held: boolean; status: string; tokens: number; done: boolean; fallback: boolean; human: boolean };
   return <div className={`card w-52 p-4 transition ${selected ? '!border-indigo-300 !bg-indigo-500/10 shadow-lg shadow-indigo-950 ring-2 ring-indigo-400/40' : d.active || d.held ? '!border-amber-400/70' : d.done ? '!border-emerald-700/70' : ''}`}>
     <Handle type="target" position={Position.Left} className="!bg-slate-500"/><Handle type="source" position={Position.Right} className="!bg-slate-500"/>
     <Handle id="return-target" type="target" position={Position.Top} className="!bg-slate-500"/><Handle id="return-source" type="source" position={Position.Bottom} className="!bg-slate-500"/>
     <div className="mb-3 flex items-start justify-between"><span className="text-xs font-semibold text-slate-200">{d.title}</span>{d.active ? <span className="h-2 w-2 animate-pulse rounded-full bg-amber-400"/> : d.done ? <CheckCircle2 size={15} className="text-emerald-500"/> : <span className="h-2 w-2 rounded-full bg-slate-700"/>}</div>
     <div className="flex items-center gap-2">{d.human ? <UserRound size={26} className="text-purple-400"/> : <Avatar agent={d.agent}/>}<div className="min-w-0"><div className="truncate text-[11px] text-slate-400">{d.human ? 'Ожидание merge' : d.agent?.name || 'Не назначен'}</div><div className="mt-0.5 text-[9px] uppercase tracking-wide text-slate-600">{d.env}</div></div></div>
+    {d.model && <div className="mt-2 truncate text-[10px] text-indigo-300" title={`Модель: ${d.model}`}>Модель: {d.model}</div>}
     <div className="mt-3 flex items-center justify-between border-t border-slate-800 pt-2 text-[10px]"><span className={d.active || d.held || d.status === 'paused' ? 'text-amber-300' : d.status === 'error' ? 'text-rose-400' : 'text-slate-500'}>{d.status === 'paused' ? 'На паузе' : d.held ? 'Нужен человек' : d.fallback ? 'Fallback' : d.active ? 'В работе' : d.done ? 'Пройден' : d.status === 'waiting_answer' ? 'Ждёт ответа' : d.status === 'error' ? 'Ошибка' : 'Ожидает'}</span><span className="flex items-center gap-1 text-orange-300/70"><Flame size={11}/>{fmtTokens(d.tokens)}</span></div>
   </div>;
 }
@@ -41,7 +42,13 @@ export default function Graph({ task, tasks, agents, reload, selectTask, notify 
   const nodes: Node[] = useMemo(() => titles.map((title, index) => {
     const stage = index + 1;
     const stageRuns = runs.filter(r => r.stage === stage);
-    return { id: String(stage), type: 'stage', selected: stage === selectedStage, position: { x: index * 340, y: index % 2 ? 150 : 90 }, data: { title, env: envs[index], agent: agents.find(a => a.id === task.stage_agents[stage]), active: task.current_stage === stage && ['running', 'waiting_answer'].includes(task.status), held: task.current_stage === stage && task.status === 'needs_human', done: task.current_stage > stage, status: task.current_stage === stage ? task.status : '', tokens: stageRuns.reduce((sum, r) => sum + spentTokens(r), 0), fallback: stageRuns.some(r => r.is_fallback), human: stage === 5 } };
+    const latestRun = stageRuns.at(-1);
+    const agent = agents.find(a => a.id === task.stage_agents[stage]);
+    const config = latestRun?.cli_used ? { cli: latestRun.cli_used, model: latestRun.model_used } : agent?.primary_config;
+    const model = stage < 5 && config
+      ? config.model?.trim() || (config.cli === 'custom' ? 'не указана' : `по умолчанию (${config.cli})`)
+      : undefined;
+    return { id: String(stage), type: 'stage', selected: stage === selectedStage, position: { x: index * 340, y: index % 2 ? 150 : 90 }, data: { title, env: envs[index], agent, model, active: task.current_stage === stage && ['running', 'waiting_answer'].includes(task.status), held: task.current_stage === stage && task.status === 'needs_human', done: task.current_stage > stage, status: task.current_stage === stage ? task.status : '', tokens: stageRuns.reduce((sum, r) => sum + spentTokens(r), 0), fallback: latestRun?.is_fallback ?? false, human: stage === 5 } };
   }), [task, runs, agents, selectedStage]);
   const latest = (stage: number) => runs.filter(r => r.stage === stage && r.status === 'completed').at(-1);
   const openArtifactEdge = useCallback((id: string, source: number, target: number) => {

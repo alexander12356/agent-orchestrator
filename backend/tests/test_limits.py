@@ -303,7 +303,13 @@ def test_fallback_runs_only_after_a_failed_run(client, agent, idle, monkeypatch,
     assert result['runs'][0]['is_fallback'] == 0
 
     other = make_task(client, agent, 'With backup')
-    prompts = fake_runner(monkeypatch, [primary_failure, writes('01_tech_doc_v1.md', '# Doc')])
+
+    def write_with_backup(directory):
+        run = current(client, other['id'])['runs'][0]
+        assert (run['status'], run['is_fallback'], run['model_used']) == ('running', 1, 'backup')
+        return writes('01_tech_doc_v1.md', '# Doc')(directory)
+
+    prompts = fake_runner(monkeypatch, [primary_failure, write_with_backup])
     asyncio.run(dispatcher.run_stage(other['id'], 1))
     result = current(client, other['id'])
     assert (result['current_stage'], result['auto_retries'], len(prompts)) == (2, 0, 2)
