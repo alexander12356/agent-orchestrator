@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import Tasks from './Tasks';
 import { Agent, Task } from './types';
@@ -34,6 +34,16 @@ const architect: Agent = {
 };
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+it('shows total token usage for each task in the list', () => {
+  const spentTask = { ...task, id: 8, title: 'Processed task', total_tokens: 12564 };
+  render(<Tasks tasks={[task, spentTask]} agents={[]} reload={vi.fn()} openTask={vi.fn()} onDeleted={vi.fn()} notify={vi.fn()}/>);
+
+  const unstarted = screen.getByRole('row', { name: /Imported task/ });
+  const processed = screen.getByRole('row', { name: /Processed task/ });
+  expect(within(unstarted).getByText('0 токенов')).toBeInTheDocument();
+  expect(within(processed).getByText('12.6k токенов')).toHaveAttribute('title', `Всего потрачено ${spentTask.total_tokens.toLocaleString('ru-RU')} токенов`);
+});
 
 describe('Task deletion', () => {
   it('confirms and deletes a task', async () => {

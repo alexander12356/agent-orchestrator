@@ -1,6 +1,6 @@
-import { Check, ChevronRight, ListTodo, LockKeyhole, Play, Plus, Search, Square, Trash2, UserRound } from 'lucide-react';
+import { Check, ChevronRight, Flame, ListTodo, LockKeyhole, Play, Plus, Search, Square, Trash2, UserRound } from 'lucide-react';
 import { FormEvent, useMemo, useState } from 'react';
-import { api, canStartPipeline } from './api';
+import { api, canStartPipeline, fmtTokens } from './api';
 import { Avatar, Empty, Modal, StageBadge } from './components';
 import { Agent, Task } from './types';
 
@@ -42,7 +42,16 @@ export default function Tasks({ tasks, agents, reload, openTask, onDeleted, noti
       <div className="overflow-x-auto"><table className="w-full min-w-[900px] border-collapse text-left"><thead><tr className="border-b border-slate-800 text-[11px] uppercase tracking-wider text-slate-500"><th className="px-5 py-3 font-medium">ID</th><th className="px-3 py-3 font-medium">Название таска</th><th className="px-3 py-3 font-medium">Этап</th><th className="px-3 py-3 font-medium">Исполнитель</th><th className="px-3 py-3 font-medium">Зависимости</th><th/></tr></thead>
       <tbody>{visible.map(task => <tr key={task.id} className="group border-b border-slate-800/60 transition hover:bg-slate-800/25">
         <td className="px-5 py-4 font-mono text-xs text-slate-500">#{task.id}</td>
-        <td className="px-3 py-4"><button onClick={() => openTask(task.id)} className="text-left text-sm font-medium text-slate-200 hover:text-indigo-300">{task.title}</button><div className="mt-2 flex flex-wrap items-center gap-2 text-[10px]">{task.external_issue_id && (task.external_issue_url ? <a className="text-indigo-400 hover:text-indigo-300" href={task.external_issue_url} target="_blank" rel="noreferrer">{task.external_issue_key || task.external_issue_id} ↗</a> : <span className="text-slate-600">{task.external_issue_key || task.external_issue_id}</span>)}{(task.milestone || task.sprint) && <span className="flex items-center gap-1 rounded bg-slate-800/70 px-2 py-0.5 text-slate-400">{task.milestone && <span>{task.milestone}</span>}{task.milestone && task.sprint && <ChevronRight size={11}/>} {task.sprint && <span>{task.sprint}</span>}</span>}</div></td>
+        <td className="px-3 py-4">
+          <button onClick={() => openTask(task.id)} className="text-left text-sm font-medium text-slate-200 hover:text-indigo-300">{task.title}</button>
+          <div className="mt-2 flex flex-wrap items-center gap-2 text-[10px]">
+            {task.external_issue_id && (task.external_issue_url ? <a className="text-indigo-400 hover:text-indigo-300" href={task.external_issue_url} target="_blank" rel="noreferrer">{task.external_issue_key || task.external_issue_id} ↗</a> : <span className="text-slate-600">{task.external_issue_key || task.external_issue_id}</span>)}
+            {(task.milestone || task.sprint) && <span className="flex items-center gap-1 rounded bg-slate-800/70 px-2 py-0.5 text-slate-400">{task.milestone && <span>{task.milestone}</span>}{task.milestone && task.sprint && <ChevronRight size={11}/>} {task.sprint && <span>{task.sprint}</span>}</span>}
+            <span className="badge badge-orange tabular-nums" title={`Всего потрачено ${task.total_tokens.toLocaleString('ru-RU')} токенов`}>
+              <Flame size={11} aria-hidden="true"/>{fmtTokens(task.total_tokens)} токенов
+            </span>
+          </div>
+        </td>
         <td className="px-3 py-4"><StageBadge task={task}/></td>
         <td className="px-3 py-4">{task.status === 'open' || task.current_stage === 0 ? <span className="text-slate-600">—</span> : task.current_stage === 5 ? <span className="flex items-center gap-2 text-xs text-slate-400"><UserRound size={18}/> Человек</span> : <span className="flex items-center gap-2 text-xs"><Avatar agent={task.current_agent}/><span>{task.current_agent?.name || '—'}</span></span>}</td>
         <td className="max-w-xs px-3 py-4">{task.dependencies.length ? <div className="flex flex-col gap-1">{task.dependencies.map(dep => <span key={dep.id} className={`flex items-center gap-1.5 text-[11px] ${dep.merged_to_main ? 'text-slate-500' : 'text-amber-300/70'}`}>{dep.merged_to_main ? <Check size={12}/> : <LockKeyhole size={11}/>} #{dep.id} {dep.title}</span>)}</div> : <span className="text-slate-700">—</span>}</td>
