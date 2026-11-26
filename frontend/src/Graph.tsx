@@ -1,6 +1,6 @@
 import TokenUsage from './TokenUsage';
 import { Background, Controls, Edge, Handle, MarkerType, Node, NodeProps, Position, ReactFlow } from '@xyflow/react';
-import { CheckCircle2, Flame, GitPullRequest, UserRound } from 'lucide-react';
+import { CheckCircle2, Circle, CircleAlert, CirclePause, Clock, Flame, GitPullRequest, LoaderCircle, Lock, UserRound } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { fmtTokens, spentTokens } from './api';
 import { Avatar, QuestionIcon } from './components';
@@ -12,18 +12,53 @@ import { Agent, Task } from './types';
 const titles = ['Тех. документация', 'Ревью документации', 'Реализация', 'Ревью реализации', 'PR · Человек'];
 const envs = ['VDS', 'VDS', 'Local Unity Worker', 'VDS', 'GitHub'];
 
-function StageNode({ data, selected }: NodeProps) {
-  const d = data as unknown as { title: string; env: string; agent?: Agent; model?: string; active: boolean; held: boolean; status: string; tokens: number; done: boolean; fallback: boolean; human: boolean };
-  const waitingForAnswer = d.status === 'waiting_answer';
-  return <div className={`card w-52 p-4 transition ${selected ? '!border-indigo-300 !bg-indigo-500/10 shadow-lg shadow-indigo-950 ring-2 ring-indigo-400/40' : d.active || d.held ? '!border-amber-400/70' : d.done ? '!border-emerald-700/70' : ''}`}>
+const waitingToStart = { icon: Clock, label: 'Ожидает запуска', color: 'text-slate-400' };
+const upcomingStatus = { icon: Circle, label: 'Ожидает', color: 'text-slate-500' };
+const stageStatuses: Record<string, { icon: typeof Circle | typeof QuestionIcon; label: string; color: string } | undefined> = {
+  running: { icon: LoaderCircle, label: 'В работе', color: 'text-amber-300' },
+  queued: { icon: Clock, label: 'В очереди', color: 'text-slate-400' },
+  open: waitingToStart,
+  stage_ready: waitingToStart,
+  waiting_worker: { icon: Clock, label: 'Ждёт воркера', color: 'text-slate-400' },
+  waiting_answer: { icon: QuestionIcon, label: 'Ждёт ответа', color: 'text-amber-300' },
+  needs_human: { icon: UserRound, label: 'Нужен человек', color: 'text-amber-300' },
+  waiting_pr: { icon: UserRound, label: 'Ожидание merge', color: 'text-amber-300' },
+  paused: { icon: CirclePause, label: 'На паузе', color: 'text-amber-300' },
+  error: { icon: CircleAlert, label: 'Ошибка', color: 'text-rose-400' },
+  done: { icon: CheckCircle2, label: 'Пройден', color: 'text-emerald-500' },
+  blocked_main: { icon: Lock, label: 'Ждёт зависимость', color: 'text-slate-400' },
+};
+
+type StageGraphNode = Node<{
+  title: string;
+  env: string;
+  agent?: Agent;
+  model?: string;
+  status: string;
+  tokens: number;
+  fallback: boolean;
+  human: boolean;
+}, 'stage'>;
+
+function StageNode({ data: d, selected }: NodeProps<StageGraphNode>) {
+  const { icon: StatusIcon, label, color } = stageStatuses[d.status] ?? upcomingStatus;
+  const running = d.status === 'running';
+  const attention = ['running', 'waiting_answer', 'needs_human'].includes(d.status);
+  return <div className={`card w-52 p-4 transition ${selected ? '!border-indigo-300 !bg-indigo-500/10 shadow-lg shadow-indigo-950 ring-2 ring-indigo-400/40' : attention ? '!border-amber-400/70' : d.status === 'done' ? '!border-emerald-700/70' : ''}`}>
     <Handle id="forward-target" type="target" position={Position.Top} className="!bg-slate-500"/>
     <Handle id="forward-source" type="source" position={Position.Right} className="!bg-slate-500"/>
     <Handle id="return-target" type="target" position={Position.Bottom} className="!bg-slate-500"/>
     <Handle id="return-source" type="source" position={Position.Left} className="!bg-slate-500"/>
-    <div className="mb-3 flex items-start justify-between"><span className="text-xs font-semibold text-slate-200">{d.title}</span>{waitingForAnswer ? <QuestionIcon/> : d.active ? <span className="h-2 w-2 animate-pulse rounded-full bg-amber-400"/> : d.done ? <CheckCircle2 size={15} className="text-emerald-500"/> : <span className="h-2 w-2 rounded-full bg-slate-700"/>}</div>
-    <div className="flex items-center gap-2">{d.human ? <UserRound size={26} className="text-purple-400"/> : <Avatar agent={d.agent}/>}<div className="min-w-0"><div className="truncate text-[11px] text-slate-400">{d.human ? 'Ожидание merge' : d.agent?.name || 'Не назначен'}</div><div className="mt-0.5 text-[9px] uppercase tracking-wide text-slate-600">{d.env}</div></div></div>
+    <div className="mb-3 flex items-start justify-between gap-2">
+      <span className="text-xs font-semibold text-slate-200">{d.title}</span>
+      <StatusIcon size={15} className={`shrink-0 ${color}${running ? ' motion-safe:animate-spin' : ''}`} aria-hidden="true"/>
+    </div>
+    <div className="flex items-center gap-2">{d.human ? <UserRound size={26} className="text-purple-400"/> : <Avatar agent={d.agent}/>}<div className="min-w-0"><div className="truncate text-[11px] text-slate-400">{d.human ? 'Ручной этап' : d.agent?.name || 'Не назначен'}</div><div className="mt-0.5 text-[9px] uppercase tracking-wide text-slate-600">{d.env}</div></div></div>
     {d.model && <div className="mt-2 truncate text-[10px] text-indigo-300" title={`Модель: ${d.model}`}>Модель: {d.model}</div>}
-    <div className="mt-3 flex items-center justify-between border-t border-slate-800 pt-2 text-[10px]"><span className={d.active || d.held || d.status === 'paused' ? 'text-amber-300' : d.status === 'error' ? 'text-rose-400' : 'text-slate-500'}>{waitingForAnswer ? 'Ждёт ответа' : d.status === 'paused' ? 'На паузе' : d.held ? 'Нужен человек' : d.fallback ? 'Fallback' : d.active ? 'В работе' : d.done ? 'Пройден' : d.status === 'error' ? 'Ошибка' : 'Ожидает'}</span><span className="flex items-center gap-1 text-orange-300/70"><Flame size={11}/>{fmtTokens(d.tokens)}</span></div>
+    <div className="mt-3 flex items-center justify-between gap-2 border-t border-slate-800 pt-2 text-[10px]">
+      <span className={color}>{label}{d.fallback && ' · Fallback'}</span>
+      <span className="flex shrink-0 items-center gap-1 text-orange-300/70"><Flame size={11}/>{fmtTokens(d.tokens)}</span>
+    </div>
   </div>;
 }
 
@@ -42,7 +77,7 @@ export default function Graph({ task, tasks, agents, reload, selectTask, notify 
     setInspectorTab('description');
   }, [task.id]);
   const runs = task.runs || [];
-  const nodes: Node[] = useMemo(() => titles.map((title, index) => {
+  const nodes: StageGraphNode[] = useMemo(() => titles.map((title, index) => {
     const stage = index + 1;
     const stageRuns = runs.filter(r => r.stage === stage);
     const latestRun = stageRuns.at(-1);
@@ -51,7 +86,9 @@ export default function Graph({ task, tasks, agents, reload, selectTask, notify 
     const model = stage < 5 && config
       ? config.model?.trim() || (config.cli === 'custom' ? 'не указана' : `по умолчанию (${config.cli})`)
       : undefined;
-    return { id: String(stage), type: 'stage', selected: stage === selectedStage, position: { x: index * 244, y: index * 204 }, data: { title, env: envs[index], agent, model, active: task.current_stage === stage && ['running', 'waiting_answer'].includes(task.status), held: task.current_stage === stage && task.status === 'needs_human', done: task.current_stage > stage, status: task.current_stage === stage ? task.status : '', tokens: stageRuns.reduce((sum, r) => sum + spentTokens(r), 0), fallback: latestRun?.is_fallback ?? false, human: stage === 5 } };
+    const currentStage = task.status === 'blocked_main' && task.current_stage === 0 ? 1 : task.current_stage;
+    const status = stage === currentStage ? task.status : stage < currentStage ? 'done' : '';
+    return { id: String(stage), type: 'stage', selected: stage === selectedStage, position: { x: index * 244, y: index * 204 }, data: { title, env: envs[index], agent, model, status, tokens: stageRuns.reduce((sum, r) => sum + spentTokens(r), 0), fallback: latestRun?.is_fallback ?? false, human: stage === 5 } };
   }), [task, runs, agents, selectedStage]);
   const latest = (stage: number) => runs.filter(r => r.stage === stage && r.status === 'completed').at(-1);
   const openArtifactEdge = useCallback((id: string, source: number, target: number) => {

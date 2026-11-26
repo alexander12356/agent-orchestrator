@@ -31,9 +31,24 @@ it('shows a question on the task and only on the stage awaiting an answer', () =
   expect(stage).toHaveAttribute('data-id', '1');
   expect(stage?.querySelector('.lucide-circle-help')).toBeInTheDocument();
   expect(container.querySelectorAll('.lucide-circle-help')).toHaveLength(2);
+  expect(container.querySelector('.lucide-loader-circle')).not.toBeInTheDocument();
 
-  rerender(view({ ...task, status: 'running' }));
+  rerender(view({ ...task, status: 'running', current_stage: 2 }));
 
   expect(container.querySelector('.lucide-circle-help')).not.toBeInTheDocument();
-  expect(screen.getByText('В работе')).toBeInTheDocument();
+  const runningStage = screen.getByText('В работе').closest('.react-flow__node');
+  expect(runningStage).toHaveAttribute('data-id', '2');
+  expect(runningStage?.querySelector('.lucide-loader-circle')).toHaveClass('motion-safe:animate-spin');
+  expect(container.querySelectorAll('.lucide-loader-circle')).toHaveLength(1);
+  expect(screen.getByText('Пройден').closest('.react-flow__node')).toHaveAttribute('data-id', '1');
+
+  rerender(view({ ...task, status: 'paused', current_stage: 2 }));
+
+  expect(screen.getByText('На паузе').closest('.react-flow__node')?.querySelector('.lucide-circle-pause')).toBeInTheDocument();
+  expect(container.querySelector('.lucide-loader-circle')).not.toBeInTheDocument();
+
+  rerender(view({ ...task, status: 'waiting_pr', current_stage: 5 }));
+
+  expect(screen.getByText('Ожидание merge').closest('.react-flow__node')).toHaveAttribute('data-id', '5');
+  expect(container.querySelector('.lucide-loader-circle')).not.toBeInTheDocument();
 });
