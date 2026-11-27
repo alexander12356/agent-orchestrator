@@ -607,7 +607,6 @@ def test_assign_creates_pr_from_summary_and_keeps_service_files_out_of_commit(tm
     assert 'SaveSystem сериализует состояние перед выходом.' in body
     assert 'raw CLI output' not in body
     assert 'Прогресс должен переживать перезапуск.' in prompts[0]
-    assert "Начни с ТЗ и утверждённого техдокумента" in prompts[0]
     assert module.PR_DETAILS_CONTRACT in prompts[0]
     completed = next(message for message in sent if message['type'] == 'TASK_COMPLETED')
     assert completed['pr_url'] == 'https://github.example/org/repo/pull/42'

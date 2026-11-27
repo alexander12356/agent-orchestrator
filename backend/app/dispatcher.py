@@ -426,21 +426,34 @@ class Dispatcher:
                 )
             )
             if stage in CHECKOUT_GUIDANCE:
-                inputs.append(
-                    search_guidance() + "\n" + CHECKOUT_GUIDANCE[stage]
-                )
+                if stage == 1:
+                    inputs.append(search_guidance())
+                else:
+                    inputs.append(
+                        "Для точечного поиска используй rg с ограничением по расширению или каталогу, "
+                        "например rg -n -g '*.cs' 'ИмяСимвола' <путь-checkout>. "
+                        "Если rg недоступен, выполни git -C <путь-checkout> grep -n 'ИмяСимвола' -- '*.cs'.\n"
+                        "Для поиска привязки Unity-компонента прочитай GUID из .cs.meta, затем найди пути командой "
+                        "git -C <путь-checkout> grep -l -F '<GUID>' -- '*.prefab' '*.unity' '*.asset'. "
+                        "Открой нужный фрагмент и проверь объект и поле ссылки."
+                    )
+                inputs.append(CHECKOUT_GUIDANCE[stage])
                 if unity_root is not None:
+                    index_setup = (
+                        "Когда нужны определения или ссылки C#, сначала подготовь индекс командой"
+                        if stage == 1 else "Перед первым поиском символов в попытке выполни"
+                    )
+                    fallback = "ограниченный поиск выше" if stage == 1 else "rg или git grep"
                     inputs.append(
                         f"Корень Unity-проекта в checkout: {unity_root}. "
                         "Для навигации по C# доступен akiojin/unity-cli в локальном режиме. "
                         "UNITY_PROJECT_ROOT указывает на временный каталог для индекса со ссылками на исходники. "
                         "Пути из вывода читай относительно корня проекта в checkout.\n"
-                        "Когда нужны определения или ссылки C#, сначала подготовь индекс командой "
-                        "unity-cli tool call build_index --json '{}' --output json.\n"
+                        f"{index_setup} unity-cli tool call build_index --json '{{}}' --output json.\n"
                         "unity-cli tool call find_symbol --json '{\"name\":\"ИмяКласса\",\"exact\":true}' --output json\n"
                         "unity-cli tool call find_refs --json '{\"name\":\"ИмяМетода\",\"pageSize\":10}' --output json\n"
                         "Проверь найденные места по исходникам: локальный индекс может вернуть одноимённые символы. "
-                        "При ошибке продолжи через ограниченный поиск выше. Для проверки, требующей Editor, укажи действие для Unity Worker."
+                        f"При ошибке продолжи через {fallback}. Для проверки, требующей Editor, укажи действие для Unity Worker."
                     )
         inputs.append(
             "Используй указанные артефакты. Отметь недостающие сведения. "

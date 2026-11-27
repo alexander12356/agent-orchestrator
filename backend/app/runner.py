@@ -273,7 +273,7 @@ def build_command(config: dict[str, Any], prompt: str, cwd: Path, stage: int = 0
         # zcode-app-cli accepts an explicit provider/model id per run; agents
         # that leave the model empty fall back to the saved ZCode default.
         args = [zcode_program(), "-p", prompt, "--mode", "yolo", "--no-color"]
-        if repo is not None:
+        if stage == 1 and repo is not None:
             args.extend(ZCODE_SEARCH_ARGS)
         if model:
             args[1:1] = ["--model", model]
