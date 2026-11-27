@@ -35,6 +35,7 @@ type StageGraphNode = Node<{
   agent?: Agent;
   model?: string;
   status: string;
+  attempts: number;
   tokens: number;
   fallback: boolean;
   human: boolean;
@@ -56,7 +57,10 @@ function StageNode({ data: d, selected }: NodeProps<StageGraphNode>) {
     <div className="flex items-center gap-2">{d.human ? <UserRound size={26} className="text-purple-400"/> : <Avatar agent={d.agent}/>}<div className="min-w-0"><div className="truncate text-[11px] text-slate-400">{d.human ? 'Ручной этап' : d.agent?.name || 'Не назначен'}</div><div className="mt-0.5 text-[9px] uppercase tracking-wide text-slate-600">{d.env}</div></div></div>
     {d.model && <div className="mt-2 truncate text-[10px] text-indigo-300" title={`Модель: ${d.model}`}>Модель: {d.model}</div>}
     <div className="mt-3 flex items-center justify-between gap-2 border-t border-slate-800 pt-2 text-[10px]">
-      <span className={color}>{label}{d.fallback && ' · Fallback'}</span>
+      <div>
+        <div className={color}>{label}{d.fallback && ' · Fallback'}</div>
+        {!d.human && <div className="mt-1 text-slate-400">Попыток: {d.attempts}</div>}
+      </div>
       <span className="flex shrink-0 items-center gap-1 text-orange-300/70"><Flame size={11}/>{fmtTokens(d.tokens)}</span>
     </div>
   </div>;
@@ -88,7 +92,7 @@ export default function Graph({ task, tasks, agents, reload, selectTask, notify 
       : undefined;
     const currentStage = task.status === 'blocked_main' && task.current_stage === 0 ? 1 : task.current_stage;
     const status = stage === currentStage ? task.status : stage < currentStage ? 'done' : '';
-    return { id: String(stage), type: 'stage', selected: stage === selectedStage, position: { x: index * 244, y: index * 204 }, data: { title, env: envs[index], agent, model, status, tokens: stageRuns.reduce((sum, r) => sum + spentTokens(r), 0), fallback: latestRun?.is_fallback ?? false, human: stage === 5 } };
+    return { id: String(stage), type: 'stage', selected: stage === selectedStage, position: { x: index * 244, y: index * 204 }, data: { title, env: envs[index], agent, model, status, attempts: stageRuns.length, tokens: stageRuns.reduce((sum, r) => sum + spentTokens(r), 0), fallback: latestRun?.is_fallback ?? false, human: stage === 5 } };
   }), [task, runs, agents, selectedStage]);
   const latest = (stage: number) => runs.filter(r => r.stage === stage && r.status === 'completed').at(-1);
   const openArtifactEdge = useCallback((id: string, source: number, target: number) => {

@@ -1,14 +1,44 @@
-import { cleanup, render, screen } from '@testing-library/react';
+import { cleanup, render, screen, within } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { StageBadge } from './components';
 import Graph from './Graph';
-import { Task } from './types';
+import { StageRun, Task } from './types';
 
 vi.mock('./Inspector', () => ({ default: () => null }));
 
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+});
+
+it('updates the attempt count for each automated stage from its runs', () => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
+  const task: Task = {
+    id: 1, title: 'Задача', status: 'running', current_stage: 2,
+    description: '', branch_name: 'feat/task-1', merged_to_main: false,
+    stage_agents: {}, dependencies: [], total_tokens: 0, created_at: '2026-11-26T00:00:00Z',
+  };
+  const run: StageRun = {
+    id: 1, task_id: task.id, stage: 1, attempt: 1, status: 'completed', started_at: task.created_at,
+    is_fallback: false, input_tokens: 0, output_tokens: 0, cache_tokens: 0, tokens_estimated: false,
+  };
+  const props = { tasks: [task], agents: [], reload: vi.fn(), selectTask: vi.fn(), notify: vi.fn() };
+  const { rerender } = render(<Graph {...props} task={{ ...task, runs: [
+    run, { ...run, id: 2, stage: 2, status: 'error' },
+  ] }}/>);
+  const stage = (title: string) => within(screen.getByText(title).closest('.react-flow__node') as HTMLElement);
+
+  expect(stage('Тех. документация').getByText('Попыток: 1')).toBeInTheDocument();
+  expect(stage('Ревью документации').getByText('Попыток: 1')).toBeInTheDocument();
+  expect(stage('Реализация').getByText('Попыток: 0')).toBeInTheDocument();
+  expect(stage('PR · Человек').queryByText(/Попыток/)).toBeNull();
+
+  rerender(<Graph {...props} task={{ ...task, runs: [
+    run, { ...run, id: 2, stage: 2, status: 'error' },
+    { ...run, id: 3, stage: 2, attempt: 2, status: 'running' },
+  ] }}/>);
+
+  expect(stage('Ревью документации').getByText('Попыток: 2')).toBeInTheDocument();
 });
 
 it('shows a question on the task and only on the stage awaiting an answer', () => {
