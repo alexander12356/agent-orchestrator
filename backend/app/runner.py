@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from typing import Any, Awaitable, Callable
 
 from .progress import progress_prompt
-from .usage import extract_usage, normalize, objects, zcode_usage
+from .usage import extract_usage, normalize, objects, recent_kimi_session, recent_zcode_session, zcode_usage
 
 RATE_LIMIT_RE = re.compile(r"rate.?limit|usage.?limit|quota exceeded|\b429\b|try again later", re.I)
 # A plain text line has to read like a CLI error report before it is checked for a limit.
@@ -61,6 +61,7 @@ class ProcessRunner:
     on_prompt_sent: Callable[[str], None] | None = None
     tracked_cli: str | None = None
     resume_session_id: str | None = None
+    on_session: Callable[[str], None] | None = None
 
     async def run(
         self,
@@ -92,18 +93,14 @@ class ProcessRunner:
         if self.tracked_cli == "zcode":
             command.insert(1, "--json")
         if self.resume_session_id:
-            if self.tracked_cli == "kimi":
-                command.extend(["--session", self.resume_session_id])
-            elif self.tracked_cli == "zcode":
-                command[1:1] = ["--resume", self.resume_session_id]
-            else:
-                command.insert(1, f"--resume={self.resume_session_id}")
+            resume_command(command, self.tracked_cli, self.resume_session_id)
         env = {**os.environ, **env, **cli_environment(config)}
         started = datetime.now(UTC)
+        kimi_home = Path(env.get("KIMI_CODE_HOME", Path.home() / ".kimi-code"))
 
         def measured_usage(output):
             kimi_since = int(started.timestamp() * 1000) if self.tracked_cli == "kimi" and self.resume_session_id else None
-            usage = extract_usage(output, cwd, env.get("KIMI_CODE_HOME", Path.home() / ".kimi-code"), kimi_since=kimi_since)
+            usage = extract_usage(output, cwd, kimi_home, kimi_since=kimi_since)
             if self.tracked_cli == "zcode":
                 raw = zcode_result(output).get("usage")
                 if isinstance(raw, dict):
@@ -127,10 +124,15 @@ class ProcessRunner:
             self.on_process(process)
         lines: list[str] = []
         limited = False
+        session_id = None
         async def handle_line(line: bytes) -> bool:
-            nonlocal limited
+            nonlocal limited, session_id
             text = line.decode("utf-8", errors="replace")
             lines.append(text)
+            if self.on_session and not session_id:
+                session_id = cli_session_id(self.tracked_cli, text)
+                if session_id:
+                    self.on_session(session_id)
             if not limited and rate_limited_line(text):
                 limited = True
                 if self.rate_limit_callback:
@@ -180,6 +182,16 @@ class ProcessRunner:
         if limited:
             await stop_cli()
         output = "".join(lines)
+        confirmed = cli_session_id(self.tracked_cli, output)
+        if self.on_session and not (confirmed or session_id or self.resume_session_id):
+            if self.tracked_cli == "kimi":
+                session = await asyncio.to_thread(recent_kimi_session, kimi_home, cwd, started)
+                confirmed = valid_session_id("kimi", session.name) if session else None
+            elif self.tracked_cli == "zcode":
+                value = await asyncio.to_thread(recent_zcode_session, cwd, started, datetime.now(UTC))
+                confirmed = valid_session_id("zcode", value)
+        if self.on_session and confirmed and confirmed != session_id:
+            self.on_session(confirmed)
         # A failed run is judged by the end of its output too: a text CLI may report the
         # limit on a line that does not look like an error report.
         if not limited and (process.returncode or 0) != 0 and limited_in_tail(lines):
@@ -187,7 +199,7 @@ class ProcessRunner:
         usage = measured_usage(output)
         return RunResult(
             process.returncode or 0, output, **usage, rate_limited=limited,
-            session_id=cli_session_id(self.tracked_cli, output),
+            session_id=confirmed or session_id,
         )
 
 
@@ -356,13 +368,24 @@ def is_cursor_cli(program: str) -> bool:
 def resumable_cli(config: dict[str, Any]) -> str | None:
     custom = config.get("command")
     if not custom:
-        return config["cli"] if config["cli"] in ("zcode", "kimi") else None
+        return config["cli"] if config["cli"] in ("zcode", "kimi", "codex") else None
     args = shlex.split(custom, posix=os.name != "nt")
     if args and is_cursor_cli(args[0].strip('"')) and not any(
         arg.split("=", 1)[0] in ("--continue", "--resume") for arg in args
     ):
         return "cursor"
     return None
+
+
+def resume_command(command: list[str], cli: str | None, session_id: str) -> None:
+    if cli == "kimi":
+        command.extend(["--session", session_id])
+    elif cli == "zcode":
+        command[1:1] = ["--resume", session_id]
+    elif cli == "codex":
+        command[-1:-1] = ["resume", session_id]
+    elif cli == "cursor":
+        command.insert(1, f"--resume={session_id}")
 
 
 def zcode_result(output: str) -> dict:
@@ -380,17 +403,25 @@ def zcode_result(output: str) -> dict:
 def cli_session_id(cli: str | None, output: str) -> str | None:
     if cli == "zcode":
         session_id = zcode_result(output).get("sessionId")
-        pattern = "sess_" + SESSION_UUID
-    elif cli in ("cursor", "kimi"):
-        kind = ("result", "success") if cli == "cursor" else ("session.resume_hint", None)
+    elif cli in ("cursor", "kimi", "codex"):
+        kinds = {
+            "cursor": {("system", "init"), ("result", "success")},
+            "kimi": {("session.resume_hint", None)},
+            "codex": {("thread.started", None)},
+        }[cli]
+        key = "thread_id" if cli == "codex" else "session_id"
         session_id = next((
-            event.get("session_id") for event in objects(reversed(output.splitlines()))
-            if (event.get("type"), event.get("subtype")) == kind
+            event.get(key) for event in objects(reversed(output.splitlines()))
+            if (event.get("type"), event.get("subtype")) in kinds
         ), None)
-        pattern = ("session_" if cli == "kimi" else "") + SESSION_UUID
     else:
         return None
-    return session_id if isinstance(session_id, str) and re.fullmatch(pattern, session_id) else None
+    return valid_session_id(cli, session_id)
+
+
+def valid_session_id(cli: str, session_id: Any) -> str | None:
+    prefix = {"zcode": "sess_", "kimi": "session_"}.get(cli, "")
+    return session_id if isinstance(session_id, str) and re.fullmatch(prefix + SESSION_UUID, session_id) else None
 
 
 def cursor_progress_messages(line: str) -> list[str]:

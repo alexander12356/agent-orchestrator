@@ -1,3 +1,4 @@
+import json
 import os
 import signal
 import time
@@ -58,3 +59,52 @@ def test_interrupt_stops_the_running_agent_and_allows_another_attempt(client, ag
     process = dispatcher.processes.get(task['id'])
     if process and process.pid and process.returncode is None:
         os.kill(process.pid, signal.SIGKILL)
+
+
+@pytest.mark.parametrize("resume_fails", [False, True])
+def test_pause_resumes_the_exact_cursor_session(client, agent, monkeypatch, tmp_path, resume_fails):
+    session_id = "12345678-1234-1234-1234-123456789abc"
+    executable = tmp_path / "agent"
+    init = json.dumps({"type": "system", "subtype": "init", "session_id": session_id})
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, time\n"
+        "from pathlib import Path\n"
+        "with Path('launches').open('a') as stream:\n"
+        "    stream.write(next((arg for arg in sys.argv if arg.startswith('--resume=')), 'fresh') + '\\n')\n"
+        f"print({init!r}, flush=True)\n"
+        f"if '--resume={session_id}' not in sys.argv:\n"
+        "    time.sleep(30)\n"
+        f"if {resume_fails!r}:\n"
+        "    raise SystemExit(1)\n"
+        "Path('01_tech_doc_v2.md').write_text('complete')\n"
+        "Path('01_questions_v2.json').write_text('{\"has_questions\":false,\"questions\":[]}')\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    config = {"cli": "custom", "command": "agent --print {prompt}", "environment": "server"}
+    response = client.put(f"/api/agents/{agent['id']}", json={"name": agent["name"], "primary_config": config})
+    assert response.status_code == 200, response.text
+    task = make_task(client, agent)
+    directory = task_dir(task["id"])
+    path = f"/api/tasks/{task['id']}"
+
+    def wait_for_run(attempt, predicate):
+        for _ in range(100):
+            with connect() as conn:
+                run = conn.execute(
+                    "SELECT * FROM stage_runs WHERE task_id=? AND attempt=? AND stage=1",
+                    (task["id"], attempt),
+                ).fetchone()
+            if run and predicate(run):
+                return run
+            time.sleep(0.05)
+        pytest.fail(f"Attempt {attempt} did not reach the expected state: {dict(run) if run else None}")
+
+    wait_for_run(1, lambda run: run["cli_session"])
+    assert client.post(f"{path}/pause").status_code == 202
+    assert client.post(f"{path}/start").status_code == 202
+    resumed = wait_for_run(2, lambda run: run["status"] in ("completed", "error"))
+    assert resumed["status"] == ("error" if resume_fails else "completed")
+    assert (directory / "launches").read_text().splitlines() == ["fresh", f"--resume={session_id}"]

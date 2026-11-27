@@ -661,31 +661,33 @@ class Dispatcher:
 
         configs = [agent["primary_config"], *agent["fallback_configs"]]
         tracked = {}
-        if stage == 1 and agent["name"] == "Neo":
-            for index, config in enumerate(configs):
-                if cli := resumable_cli(config):
-                    data = json.dumps([config, agent["role_prompt"], checkout], sort_keys=True, default=str)
-                    tracked[index] = (cli, sha256(data.encode()).hexdigest())
+        for index, config in enumerate(configs):
+            if cli := resumable_cli(config):
+                data = json.dumps([config, agent["role_prompt"], checkout], sort_keys=True, default=str)
+                tracked[index] = (cli, sha256(data.encode()).hexdigest())
         continuation = None
+        from_pause = False
         answer_file = directory / f"01_answers_v{attempt - 1}.md"
-        if (
-            tracked and revise and review is None and answer_file.is_file()
+        clarifying = (
+            stage == 1 and agent["name"] == "Neo" and revise and review is None and answer_file.is_file()
             and doc.name == STAGE_FILES[1].format(attempt=attempt - 1)
-        ):
+        )
+        if tracked and attempt > 1:
             with connect() as conn:
                 prior = conn.execute(
-                    "SELECT cli_session FROM stage_runs "
-                    "WHERE task_id=? AND stage=1 AND attempt=? AND agent_id=? AND status='completed'",
-                    (task["id"], attempt - 1, agent["id"]),
+                    "SELECT status, cli_session FROM stage_runs WHERE task_id=? AND stage=? AND attempt=? AND agent_id=?",
+                    (task["id"], stage, attempt - 1, agent["id"]),
                 ).fetchone()
             if prior and prior["cli_session"]:
                 session = json.loads(prior["cli_session"])
-                if session["resumes"] < NEO_RESUME_LIMIT:
+                from_pause = prior["status"] == "paused"
+                if from_pause or (clarifying and prior["status"] == "completed" and session["resumes"] < NEO_RESUME_LIMIT):
                     for index, (_, fingerprint) in tracked.items():
                         if session["fingerprint"] == fingerprint:
                             continuation = session
                             continuation_index = index
                             break
+                from_pause = from_pause and continuation is not None
         next_session = None
         with contextlib.ExitStack() as stack:
             unity_root = None
@@ -711,7 +713,9 @@ class Dispatcher:
                 doc=doc, review=review, draft=draft, unity_root=unity_root,
             )
             launches = [(index, False) for index in range(len(configs))]
-            if continuation:
+            if from_pause:
+                launches = [(continuation_index, True)]
+            elif continuation:
                 launches.insert(0, (continuation_index, True))
             skip_fresh = None
             for index, resumed in launches:
@@ -727,17 +731,38 @@ class Dispatcher:
                     draft_questions.unlink(missing_ok=True)
                 with connect() as conn:
                     conn.execute(
-                        "UPDATE stage_runs SET cli_used=?, model_used=?, is_fallback=? WHERE id=? AND status='running'",
-                        (config["cli"], config.get("model", ""), int(index > 0), run_id),
+                        "UPDATE stage_runs SET cli_used=?, model_used=?, is_fallback=?, cli_session=? WHERE id=? AND status='running'",
+                        (config["cli"], config.get("model", ""), int(index > 0),
+                         json.dumps(continuation) if resumed else None, run_id),
                     )
                 if index and not resumed:
                     await log(f"Fallback: {config['cli']} {config.get('model', '')}\n")
                 runner = ProcessRunner(log_callback=log, on_process=register_process, on_prompt_sent=record_prompt)
                 runner.tracked_cli, fingerprint = tracked.get(index, (None, None))
+                resumes = continuation["resumes"] + int(not from_pause) if resumed else 0
+
+                def record_session(session_id: str) -> None:
+                    if resumed and session_id != continuation["id"]:
+                        return
+                    with connect() as conn:
+                        conn.execute(
+                            "UPDATE stage_runs SET cli_session=? WHERE id=? AND status IN ('running', 'paused')",
+                            (json.dumps({"id": session_id, "fingerprint": fingerprint, "resumes": resumes}), run_id),
+                        )
+
+                if fingerprint:
+                    runner.on_session = record_session
                 cli_prompt = prompt
                 if resumed:
                     runner.resume_session_id = continuation["id"]
-                    await log(f"Продолжаю сессию Neo ({continuation['resumes'] + 1}/{NEO_RESUME_LIMIT})\n")
+                if from_pause:
+                    await log("Продолжаю прежнюю сессию после паузы.\n")
+                    cli_prompt = (
+                        "Продолжи прерванную работу в этой сессии с учётом уже сделанного. "
+                        "Используй актуальные пути к выходным файлам из задания ниже.\n\n" + prompt
+                    )
+                elif resumed:
+                    await log(f"Продолжаю сессию Neo ({resumes}/{NEO_RESUME_LIMIT})\n")
                     cli_prompt = (
                         "Продолжи уточнение техдокумента по согласованным ранее требованиям.\n"
                         f"Последний ответ на твои вопросы:\n{answer_file.read_text(encoding='utf-8').strip()}\n\n"
@@ -756,12 +781,14 @@ class Dispatcher:
                         (result.input_tokens, result.cache_tokens, result.output_tokens, int(result.estimated), run_id),
                     )
                 if task["id"] in self.stop_requested:
+                    if fingerprint and result.session_id:
+                        record_session(result.session_id)
                     self._mark_stopped(run_id)
                     return
                 validation_error = None
                 session_id = result.session_id if fingerprint else None
                 if resumed and result.exit_code == 0 and session_id != continuation["id"]:
-                    validation_error = "CLI не подтвердил продолжение нужной сессии Neo."
+                    validation_error = "CLI не подтвердил продолжение нужной сессии."
                 if draft and result.exit_code == 0 and not validation_error:
                     try:
                         if not draft.is_file() or not draft.read_text(encoding="utf-8").strip() or not draft_questions.is_file():
@@ -778,8 +805,11 @@ class Dispatcher:
                         next_session = json.dumps({
                             "id": session_id,
                             "fingerprint": fingerprint,
-                            "resumes": continuation["resumes"] + 1 if resumed else 0,
+                            "resumes": resumes,
                         })
+                    break
+                if from_pause:
+                    validation_error = validation_error or f"Не удалось завершить прежнюю сессию: {describe_failure(result, artifact_name)}"
                     break
                 if resumed:
                     if not (result.rate_limited or result.timed_out or result.exit_code == 127):
@@ -807,17 +837,23 @@ class Dispatcher:
                 (str(artifact), status, now(), error, next_session, run_id),
             )
         if not success:
-            raise StageFailure(error, retryable=not result.timed_out and not result.rate_limited and result.exit_code != 127)
+            raise StageFailure(error, retryable=not from_pause and not result.timed_out and not result.rate_limited and result.exit_code != 127)
         await self._process_artifact(task["id"], stage, attempt, from_run=True)
 
     async def _run_worker(self, task: dict[str, Any], agent: dict[str, Any], attempt: int, run_id: int) -> None:
         directory = task_dir(task["id"])
         docs = latest_document(task["id"], directory)
         reviews = latest_version(directory, "04_code_review_v*.json", exclude=paused_artifacts(task["id"]))
+        with connect() as conn:
+            prior = conn.execute(
+                "SELECT id FROM stage_runs WHERE task_id=? AND stage=3 AND attempt=? AND agent_id=? AND status='paused'",
+                (task["id"], attempt - 1, agent["id"]),
+            ).fetchone()
         sent = await hub.send({
             "type": "ASSIGN_TASK",
             "task_id": task["id"],
             "run_id": run_id,
+            **({"paused_run_id": prior["id"]} if prior else {}),
             "branch_name": task["branch_name"],
             "task_title": task["title"],
             "task_description": task["description"],

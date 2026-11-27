@@ -22,7 +22,8 @@ import websockets
 # The worker can be started directly as a script from any working directory.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from backend.app.progress import progress_prompt
-from backend.app.usage import FIELDS, extract_usage, recent_kimi_usage, zcode_usage
+from backend.app.runner import cli_session_id, resume_command, valid_session_id
+from backend.app.usage import FIELDS, extract_usage, recent_kimi_session, recent_kimi_usage, zcode_usage
 
 RATE_LIMIT_RE = re.compile(r"rate.?limit|usage.?limit|quota exceeded|\b429\b|try again later", re.I)
 # A plain text line has to read like a CLI error report before it is checked for a limit.
@@ -424,18 +425,29 @@ class UnityWorker:
     async def run_agent(
         self, task_id: int, path: Path, config: dict[str, Any], prompt: str, timeout: int,
         run_id: int | None = None, publish_usage: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        *, resume_session_id: str | None = None,
     ) -> dict[str, Any]:
         async def publish(text: str) -> None:
             await self.log(task_id, text)
 
         async with progress_prompt(prompt, path, publish) as prompt:
-            return await self._run_cli(task_id, path, config, prompt, timeout, run_id, publish_usage)
+            return await self._run_cli(task_id, path, config, prompt, timeout, run_id, publish_usage, resume_session_id)
+
+    def save_kimi_session(self, task_id: int, run_id: int, config: dict[str, Any], session_id: str) -> None:
+        self.worktrees.mkdir(parents=True, exist_ok=True)
+        checkpoint = self.worktrees / f".task-{task_id}-kimi-session.json"
+        temp = checkpoint.with_suffix(".tmp")
+        temp.write_text(json.dumps({"run_id": run_id, "config": config, "id": session_id}), encoding="utf-8")
+        temp.replace(checkpoint)
 
     async def _run_cli(
         self, task_id: int, path: Path, config: dict[str, Any], prompt: str, timeout: int,
         run_id: int | None, publish_usage: Callable[[dict[str, Any]], Awaitable[None]] | None,
+        resume_session_id: str | None = None,
     ) -> dict[str, Any]:
         command = self.command(config, prompt, path)
+        if resume_session_id:
+            resume_command(command, "kimi", resume_session_id)
         env = os.environ.copy()
         is_kimi = config.get("cli") == "kimi"
         usage_cwd = path
@@ -483,7 +495,7 @@ class UnityWorker:
                 await self.send({"type": "TASK_PROMPT", "task_id": task_id, "run_id": run_id, "prompt": prompt})
             try:
                 async with asyncio.timeout(timeout * 60):
-                    if track_kimi_session and publish_usage is not None:
+                    if track_kimi_session and publish_usage is not None and not resume_session_id:
                         while not (await asyncio.wait({waiter}, timeout=5))[0]:
                             usage = await asyncio.to_thread(recent_kimi_usage, kimi_home, usage_cwd, started)
                             if usage and usage != live_usage:
@@ -496,6 +508,14 @@ class UnityWorker:
                 await self.terminate_process(process)
         except asyncio.CancelledError:
             await self.stop_process_tree(process)
+            if track_kimi_session and run_id is not None:
+                await self.finish_consumer(consumer)
+                session_id = resume_session_id or cli_session_id("kimi", "".join(lines))
+                if not session_id:
+                    session = await asyncio.to_thread(recent_kimi_session, kimi_home, usage_cwd, started)
+                    session_id = valid_session_id("kimi", session.name) if session else None
+                if session_id:
+                    self.save_kimi_session(task_id, run_id, config, session_id)
             raise
         finally:
             if process.returncode is None:
@@ -511,11 +531,16 @@ class UnityWorker:
             limited = False
         elif not limited and not timed_out and limited_in_tail(lines):
             limited = True
-        usage = extract_usage(output, usage_cwd, kimi_home)
-        if not usage and track_kimi_session:
+        kimi_since = int(started.timestamp() * 1000) if resume_session_id else None
+        usage = extract_usage(output, usage_cwd, kimi_home, kimi_since=kimi_since)
+        if not usage and track_kimi_session and not resume_session_id:
             usage = await asyncio.to_thread(recent_kimi_usage, kimi_home, usage_cwd, started) or live_usage
         if not usage and config.get("cli") == "zcode":
             usage = zcode_usage(path, started, datetime.now(UTC))
+        if track_kimi_session and run_id is not None and process.returncode == 0:
+            session_id = cli_session_id("kimi", output)
+            if session_id and (not resume_session_id or session_id == resume_session_id):
+                self.save_kimi_session(task_id, run_id, config, session_id)
         usage = usage or {"estimated": True}
         return {"exit_code": process.returncode or 0, "output": output, "rate_limited": limited, "timed_out": timed_out, **usage}
 
@@ -535,7 +560,7 @@ class UnityWorker:
             return f"код возврата {result['exit_code']}"
         return None
 
-    async def run_with_fallback(self, task_id: int, path: Path, prompt: str, config: dict[str, Any], triggers: dict[str, Any], run_id: int | None = None, previous_usage: dict[str, Any] | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
+    async def run_with_fallback(self, task_id: int, path: Path, prompt: str, config: dict[str, Any], triggers: dict[str, Any], run_id: int | None = None, previous_usage: dict[str, Any] | None = None, *, paused_run_id: int | None = None) -> tuple[dict[str, Any], dict[str, Any]]:
         timeout = int(triggers.get("timeout_minutes", 20))
         configs = [config["primary"], *config.get("fallback", [])]
         previous_usage = previous_usage or {}
@@ -548,7 +573,20 @@ class UnityWorker:
             await self.send({"type": "TASK_USAGE", "task_id": task_id, "run_id": run_id, **counts,
                              "usage_partial": partial or usage.get("estimated", False)})
 
-        for index, candidate in enumerate(configs):
+        launches = list(enumerate(configs))
+        session_id = None
+        checkpoint = self.worktrees / f".task-{task_id}-kimi-session.json"
+        if paused_run_id is not None and checkpoint.is_file():
+            saved = json.loads(checkpoint.read_text(encoding="utf-8"))
+            if saved["run_id"] == paused_run_id and saved["config"] in configs:
+                session_id = valid_session_id("kimi", saved["id"])
+                if session_id:
+                    index = configs.index(saved["config"])
+                    launches = [(index, configs[index])]
+                    await self.log(task_id, "Продолжаю прежнюю сессию Kimi после паузы.\n")
+                    prompt = "Продолжи прерванную реализацию с учётом уже сделанного.\n\n" + prompt
+
+        for index, candidate in launches:
             label = self.config_label(candidate)
             if run_id is not None:
                 await self.send({
@@ -559,8 +597,11 @@ class UnityWorker:
                 await self.log(task_id, f"Fallback: {label} — запуск\n")
             try:
                 result = await self.run_agent(task_id, path, candidate, prompt, timeout, run_id,
-                                              publish_usage if run_id is not None else None)
+                                              publish_usage if run_id is not None else None,
+                                              **({"resume_session_id": session_id} if session_id else {}))
             except Exception as exc:
+                if session_id:
+                    raise RuntimeError(f"Не удалось продолжить прежнюю сессию Kimi: {exc}") from exc
                 partial = True
                 failures.append(f"{label}: {exc}")
                 if index == len(configs) - 1:
@@ -574,6 +615,8 @@ class UnityWorker:
                 totals[key] += result.get(key, 0)
             partial |= result.get("estimated", False)
             details = self.failure_details(result, timeout)
+            if session_id and (details or cli_session_id("kimi", result["output"]) != session_id):
+                raise RuntimeError(f"Не удалось продолжить прежнюю сессию Kimi: {details or 'CLI не подтвердил ID сессии'}")
             if details is None:
                 return candidate, {**result, **totals, "estimated": False, "usage_partial": partial}
             failures.append(f"{label}: {details}")
@@ -637,7 +680,7 @@ class UnityWorker:
         triggers = config.get("triggers", {})
         branch = message["branch_name"]
         checkpoint = self.worktrees / f".task-{task_id}-publication.json"
-        inputs = {key: value for key, value in message.items() if key != "run_id"}
+        inputs = {key: value for key, value in message.items() if key not in ("run_id", "paused_run_id")}
         fingerprint = hashlib.sha256(json.dumps(inputs, sort_keys=True).encode("utf-8")).hexdigest()
         try:
             path = await self.prepare_worktree(task_id, branch)
@@ -675,7 +718,11 @@ class UnityWorker:
                 "В validation укажи команды реально выполненных проверок и их результаты. "
                 "В review_focus укажи важные для ревью решения или ограничения. При отсутствии данных оставь соответствующий список пустым."
             )
-            selected, result = await self.run_with_fallback(task_id, path, prompt, config, triggers, run_id)
+            paused_run_id = message.get("paused_run_id")
+            selected, result = await self.run_with_fallback(
+                task_id, path, prompt, config, triggers, run_id,
+                **({"paused_run_id": paused_run_id} if paused_run_id is not None else {}),
+            )
             try:
                 unity_status = await self.run_unity(path, task_id)
             except UnityCompilationError as exc:

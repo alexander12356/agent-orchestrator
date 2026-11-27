@@ -394,6 +394,54 @@ def test_kimi_worker_reports_live_and_final_windows_usage(monkeypatch, tmp_path)
     assert result['usage_partial'] is False
 
 
+def test_kimi_worker_reuses_the_session_saved_on_cancel(monkeypatch, tmp_path):
+    worker = make_worker(tmp_path)
+    worker.worktrees.mkdir()
+    session_id = "session_12345678-1234-1234-1234-123456789abc"
+    script = tmp_path / "kimi.py"
+    script.write_text(
+        "import json, sys, time\n"
+        "from pathlib import Path\n"
+        f"session_id = {session_id!r}\n"
+        "if '--session' in sys.argv:\n"
+        "    assert sys.argv[-2:] == ['--session', session_id]\n"
+        "    Path('resumed').touch()\n"
+        "    print(json.dumps(dict(type='session.resume_hint', session_id=session_id)))\n"
+        "else:\n"
+        "    session = Path('sessions/worktree') / session_id\n"
+        "    session.mkdir(parents=True)\n"
+        "    temp = session / 'state.tmp'\n"
+        "    temp.write_text(json.dumps(dict(cwd=str(Path.cwd()), createdAt=time.time_ns() // 1000000)))\n"
+        "    temp.rename(session / 'state.json')\n"
+        "    Path('started').touch()\n"
+        "    time.sleep(30)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(worker, "command", lambda *args: [sys.executable, str(script)])
+    monkeypatch.setattr(worker, "kimi_usage_location", lambda *args: asyncio.sleep(0, result=(tmp_path, tmp_path)))
+
+    async def scenario():
+        async def send(message):
+            pass
+
+        worker.send = send
+        config = {"primary": KIMI}
+        job = asyncio.create_task(worker.run_with_fallback(1, tmp_path, "implement", config, {}, run_id=7))
+        worker.jobs[1] = job
+        async with asyncio.timeout(5):
+            while not (tmp_path / "started").exists():
+                await asyncio.sleep(0.02)
+        await worker.cancel(1)
+        assert job.cancelled()
+        _, result = await worker.run_with_fallback(
+            1, tmp_path, "implement", config, {}, run_id=8, paused_run_id=7,
+        )
+        assert result["exit_code"] == 0
+        assert (tmp_path / "resumed").exists()
+
+    asyncio.run(scenario())
+
+
 def test_run_agent_reads_long_lines_and_ignores_limit_words_in_prose(tmp_path):
     messages = []
     result = run_cli(

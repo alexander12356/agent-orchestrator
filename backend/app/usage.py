@@ -94,7 +94,7 @@ def kimi_usage(session, cwd, since=None):
         return {}
 
 
-def recent_kimi_usage(home, cwd, started):
+def recent_kimi_session(home, cwd, started):
     since = int(started.timestamp() * 1000)
     sessions = []
     for state_file in (home / "sessions").glob("*/*/state.json"):
@@ -108,8 +108,33 @@ def recent_kimi_usage(home, cwd, started):
         if type(created) is int and created >= since:
             sessions.append(session)
             if len(sessions) > 1:
-                return {}
-    return kimi_usage(sessions[0], cwd) if sessions else {}
+                return None
+    return sessions[0] if sessions else None
+
+
+def recent_kimi_usage(home, cwd, started):
+    session = recent_kimi_session(home, cwd, started)
+    return kimi_usage(session, cwd) if session else {}
+
+
+def zcode_sessions(conn, cwd, start, end):
+    return conn.execute(
+        "SELECT id FROM session WHERE directory=? AND parent_id IS NULL AND time_created BETWEEN ? AND ?",
+        (str(cwd), int(start.timestamp() * 1000), int(end.timestamp() * 1000)),
+    ).fetchall()
+
+
+def recent_zcode_session(cwd, start, end):
+    database = Path.home() / ".zcode/cli/db/db.sqlite"
+    if database.is_file():
+        try:
+            with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as conn:
+                sessions = zcode_sessions(conn, cwd, start, end)
+                if len(sessions) == 1:
+                    return sessions[0][0]
+        except sqlite3.Error:
+            pass
+    return None
 
 
 def zcode_usage(cwd, start, end):
@@ -118,10 +143,7 @@ def zcode_usage(cwd, start, end):
         return {}
     try:
         with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as conn:
-            sessions = conn.execute(
-                "SELECT id FROM session WHERE directory=? AND parent_id IS NULL AND time_created BETWEEN ? AND ?",
-                (str(cwd), int(start.timestamp() * 1000), int(end.timestamp() * 1000)),
-            ).fetchall()
+            sessions = zcode_sessions(conn, cwd, start, end)
             if len(sessions) != 1:
                 return {}
             rows = conn.execute(
