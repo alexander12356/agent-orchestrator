@@ -72,6 +72,7 @@ CREATE TABLE IF NOT EXISTS stage_runs (
     is_fallback INTEGER NOT NULL DEFAULT 0,
     artifact_path TEXT,
     reviewed_document TEXT,
+    reviewed_commit TEXT,
     cli_session TEXT,
     yougile_question_message_id INTEGER,
     input_tokens INTEGER NOT NULL DEFAULT 0,
@@ -188,6 +189,8 @@ def init_db() -> None:
             conn.execute("ALTER TABLE stage_runs ADD COLUMN yougile_question_message_id INTEGER")
         if "reviewed_document" not in run_columns:
             conn.execute("ALTER TABLE stage_runs ADD COLUMN reviewed_document TEXT")
+        if "reviewed_commit" not in run_columns:
+            conn.execute("ALTER TABLE stage_runs ADD COLUMN reviewed_commit TEXT")
         if "cli_session" not in run_columns:
             conn.execute("ALTER TABLE stage_runs ADD COLUMN cli_session TEXT")
         if "sent_prompt" not in run_columns:

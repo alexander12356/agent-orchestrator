@@ -5,7 +5,7 @@ import json
 import re
 import shutil
 from collections.abc import Collection
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from typing import Any
 
@@ -36,6 +36,10 @@ CHECKOUT_GUIDANCE = {
        "для изменённого Unity-компонента — затронутые сериализованные ссылки. Проверки в Editor сверяй с отчётом Worker.",
 }
 VERDICT_CONTRACT = '{"status": "APPROVED"|"REJECTED", "summary": string, "comments": string[], "notes": string[]}'
+DOC_VERDICT_CONTRACT = (
+    VERDICT_CONTRACT[:-1] + ', "revision_context": [{"acceptance_criterion": string, '
+    '"sections": string[], "source_paths": string[]}]}'
+)
 VERSION_RE = re.compile(r"_v(\d+)\.")
 NEO_RESUME_LIMIT = 2
 
@@ -96,7 +100,7 @@ def latest_document(task_id: int, directory: Path) -> Path | None:
 def document_review(task_id: int, doc: Path) -> dict[str, Any] | None:
     with connect() as conn:
         reviews = conn.execute(
-            """SELECT review.attempt, review.reviewed_document, (
+            """SELECT review.attempt, review.reviewed_document, review.reviewed_commit, (
                    SELECT doc.attempt FROM stage_runs doc
                    WHERE doc.task_id=review.task_id AND doc.stage=1 AND doc.status='completed' AND doc.id < review.id
                    ORDER BY doc.id DESC LIMIT 1
@@ -112,7 +116,10 @@ def document_review(task_id: int, doc: Path) -> dict[str, Any] | None:
             target = STAGE_FILES[1].format(attempt=review["legacy_document"])
         if target == doc.name:
             try:
-                return read_verdict(doc.parent / STAGE_FILES[2].format(attempt=review["attempt"]))
+                verdict = read_verdict(doc.parent / STAGE_FILES[2].format(attempt=review["attempt"]), document=True)
+                if verdict.get("revision_context"):
+                    verdict["reviewed_commit"] = review["reviewed_commit"]
+                return verdict
             except StageFailure:
                 continue
     return None
@@ -155,9 +162,10 @@ def describe_failure(result: RunResult, artifact_name: str) -> str:
     return f"{reason}\n\n{tail}" if tail else reason
 
 
-def read_verdict(path: Path) -> dict[str, Any]:
+def read_verdict(path: Path, *, document: bool = False, require_context: bool = False) -> dict[str, Any]:
     """A review verdict that follows the contract; anything else is a retryable failure."""
-    invalid = f"Вердикт {path.name} не соответствует контракту {VERDICT_CONTRACT}: "
+    contract = DOC_VERDICT_CONTRACT if document else VERDICT_CONTRACT
+    invalid = f"Вердикт {path.name} не соответствует контракту {contract}: "
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -170,6 +178,27 @@ def read_verdict(path: Path) -> dict[str, Any]:
             raise StageFailure(invalid + f"{key} должен быть списком строк", retryable=True)
     if data["status"] == "REJECTED" and not data.get("comments"):
         raise StageFailure(invalid + "при REJECTED нужны блокирующие замечания в comments", retryable=True)
+    if document and ("revision_context" in data or (require_context and data["status"] == "REJECTED")):
+        context = data.get("revision_context")
+        expected = len(data["comments"]) if data["status"] == "REJECTED" else 0
+        if not isinstance(context, list) or len(context) != expected:
+            raise StageFailure(invalid + "нужна одна запись revision_context на каждый блокер в порядке comments", retryable=True)
+        for entry in context:
+            criterion = entry.get("acceptance_criterion") if isinstance(entry, dict) else None
+            if not isinstance(criterion, str) or not criterion.strip():
+                raise StageFailure(invalid + "у каждого блокера нужен критерий приёмки", retryable=True)
+            for key in ("sections", "source_paths"):
+                items = entry.get(key)
+                if not isinstance(items, list) or not all(isinstance(item, str) and item.strip() for item in items):
+                    raise StageFailure(invalid + f"{key} должен быть списком непустых строк", retryable=True)
+            if not entry["sections"]:
+                raise StageFailure(invalid + "у каждого блокера нужен хотя бы один затронутый раздел", retryable=True)
+            if any(
+                PurePosixPath(source).is_absolute() or not PurePosixPath(source).parts
+                or ".." in PurePosixPath(source).parts or re.search(r"[\\:\x00-\x1f]", source)
+                for source in entry["source_paths"]
+            ):
+                raise StageFailure(invalid + "source_paths должны быть путями относительно корня checkout", retryable=True)
     return data
 
 
@@ -377,6 +406,8 @@ class Dispatcher:
                 unity_root: Path | None = None) -> str:
         directory = task_dir(task["id"])
         artifact = directory / STAGE_FILES[stage].format(attempt=attempt)
+        rejected_review = review if stage == 1 and review and review["status"] == "REJECTED" else None
+        revision_context = rejected_review.get("revision_context") if rejected_review else None
         inputs = [f"ТЗ: {directory / '00_task.md'}"]
         chat = directory / "00_yougile_chat.md"
         if chat.is_file():
@@ -388,7 +419,7 @@ class Dispatcher:
                 f"Ветка {ref}, коммит {commit}. Используй этот каталог только для чтения. "
                 + (
                     "Открывай исходники для проверки контракта, затронутого правкой."
-                    if draft else
+                    if draft or revision_context else
                     "Самостоятельно найди в нём исходники, тесты и данные для задачи. "
                     "Проверяй контракты по файлам выбранного коммита перед тем, как задавать вопросы о недостающих сведениях."
                 )
@@ -423,26 +454,52 @@ class Dispatcher:
         doc = doc or latest_document(task["id"], directory)
         questions_file = (draft.parent if draft else directory) / f"01_questions_v{attempt}.json"
         answers = numbered_versions(directory, "01_answers_v*.md")
+        latest_answer = None
         if answers:
             inputs.append("Согласованные ответы в порядке версий. Если поздний ответ уточняет тот же вопрос, используй уточнение.")
         for answer in answers:
             version = VERSION_RE.search(answer.name)[1]
             questions = read_questions(directory / f"01_questions_v{version}.json")["questions"]
             numbered = "\n".join(f"{i}. {question}" for i, question in enumerate(questions, start=1))
-            inputs.append(
+            exchange = (
                 f"Вопросы v{version}:\n{numbered or 'Исходные вопросы отсутствуют.'}\n"
                 f"Ответ v{version}:\n{answer.read_text(encoding='utf-8').strip()}"
             )
+            if revision_context and answer == answers[-1]:
+                latest_answer = exchange
+            else:
+                inputs.append(exchange)
         if stage == 1:
-            if review and review["status"] == "REJECTED":
+            if revision_context:
+                inputs.append("Контекст доработки по ревью техдокумента. Сохрани согласованное поведение.")
+                reviewed_commit = rejected_review.get("reviewed_commit")
+                for comment, context in zip(rejected_review["comments"], revision_context, strict=True):
+                    sources = "\n".join(f"- {source}" for source in context["source_paths"])
+                    inputs.append(
+                        f"Блокер ревью: {comment}\n"
+                        f"Критерий приёмки: {context['acceptance_criterion']}\n"
+                        f"Затронутые разделы: {', '.join(context['sections'])}\n"
+                        + (f"Проверенные исходники (коммит {reviewed_commit}):\n{sources}"
+                           if sources and reviewed_commit else "Проверенные исходники с подтверждённым коммитом не указаны.")
+                    )
+                inputs.append(f"Последний ответ пользователя:\n{latest_answer or 'Ответов пока нет.'}")
+                if reviewed_commit and checkout and reviewed_commit != checkout[2]:
+                    inputs.append("Коммит ревью отличается от текущего checkout. Заново проверь указанные пути и контракт в текущем коммите.")
+                inputs.append(
+                    "При локальном замечании открой указанные разделы и файлы. Проверь затронутый контракт и внеси связанные "
+                    "правки в сущности, схему и сценарии за один проход. "
+                    "Для архитектурной правки используй полный документ и поиск по checkout."
+                )
+            elif rejected_review:
                 inputs.append(
                     "Исправь блокеры ревью этой версии. Сохрани согласованное поведение.\n"
-                    + "\n".join(f"- {comment}" for comment in review["comments"])
+                    + "\n".join(f"- {comment}" for comment in rejected_review["comments"])
                 )
             if doc and not draft and (review or answers):
                 inputs.append(
                     f"Предыдущая версия: {doc}. Сохрани согласованное поведение. "
-                    "Исправь затронутые места и примени правила детализации ко всему документу."
+                    + ("Исправь затронутые места и перенеси остальные разделы из предыдущей версии."
+                       if revision_context else "Исправь затронутые места и примени правила детализации ко всему документу.")
                 )
             if draft:
                 inputs.append(
@@ -455,12 +512,25 @@ class Dispatcher:
                 output = "Сохрани три раздела в этом порядке:"
             else:
                 output = f"Запиши полный техдокумент в {artifact}. Используй три раздела в таком порядке:"
+            detail_scope = (
+                "При локальной доработке применяй правила детализации к изменяемым фрагментам. "
+                "Проверь связанные места и сохрани остальной текст. Для архитектурной правки проверь все затронутые разделы. "
+                if revision_context else
+                "Правила детализации действуют во всех разделах. "
+                "Если избыточные подробности уже есть, удали их из всего документа, включая разделы вне текущей правки. "
+            )
+            scenario_format = (
+                "При изменении сценария, оформленного таблицей, перенеси его в шаблон и сохрани все согласованные проверки. "
+                if revision_context else
+                "Если в рабочей копии сценарии оформлены таблицей, переложи весь раздел в этот шаблон "
+                "и сохрани все согласованные проверки. "
+            )
             result = (
                 f"{output}\n"
-                "Правила детализации действуют во всех разделах. Из прежней версии переноси согласованные "
+                "Из прежней версии переноси согласованные "
                 "сущности, связи и наблюдаемое поведение. Поля, подписки, служебные вызовы, покадровые переходы "
-                "и устройство тестов оставь этапу реализации. Если такие подробности уже есть, удали их "
-                "из всего документа, включая разделы вне текущей правки. Согласованное требование из удаляемого "
+                "и устройство тестов оставь этапу реализации. "
+                f"{detail_scope}Согласованное требование из удаляемого "
                 "фрагмента сохрани кратко как ответственность сущности, связь или ожидаемый результат сценария.\n"
                 "1. «Сущности и связи». Перечисли новые и изменяемые сущности: компоненты, презентеры, "
                 "сервисы, узлы и подграфы NodeCanvas и другие части проекта. Для каждой новой сущности "
@@ -486,8 +556,7 @@ class Dispatcher:
                 "- <Наблюдаемый результат. Каждый дополнительный критерий вынеси в отдельный пункт.>\n\n"
                 "**Путь по схеме.** <Назови маршрут или развилку из раздела «Алгоритм».>\n\n"
                 "Не оформляй сценарии таблицей. Варианты с разными входными данными или результатами "
-                "опиши отдельными сценариями со ссылкой на общий путь. Если в рабочей копии сценарии "
-                "оформлены таблицей, переложи весь раздел в этот шаблон и сохрани все согласованные проверки. "
+                f"опиши отдельными сценариями со ссылкой на общий путь. {scenario_format}"
                 "Опирайся на исходники для существующих сущностей и связей. "
                 "Открытое продуктовое решение отметь у затронутого сценария и запиши вопрос отдельно. "
                 "Сохрани документ даже при открытых вопросах.\n"
@@ -518,7 +587,13 @@ class Dispatcher:
                 )
                 comments = (
                     "Для блокера по сценарию укажи ожидаемое поведение. Для блокера по детализации "
-                    "укажи фрагмент и что сохранить при сокращении. Выбор реализации оставь разработчику."
+                    "укажи фрагмент и что сохранить при сокращении. Выбор реализации оставь разработчику. "
+                    "Для каждого блокера добавь запись в revision_context в том же порядке, что и comments. "
+                    "В acceptance_criterion опиши наблюдаемое условие, по которому примешь правку. "
+                    "В sections укажи заголовки затронутых разделов или сценариев, включая те, которые надо добавить. "
+                    "В source_paths перечисли только файлы, которые ты открыл и проверил для этого блокера. "
+                    "Указывай пути от корня checkout. Если исходники для блокера не проверялись, запиши []. "
+                    "Коммит checkout сохранит оркестратор. При APPROVED запиши revision_context: []."
                 )
             else:
                 report = latest_version(directory, "03_impl_report_v*.md", exclude=excluded)
@@ -556,8 +631,9 @@ class Dispatcher:
                 )
             if previous:
                 inputs.append(f"Предыдущий вердикт: {previous}")
+            contract = DOC_VERDICT_CONTRACT if stage == 2 else VERDICT_CONTRACT
             result = (
-                f"{check}\nЗапиши вердикт в {artifact} по контракту {VERDICT_CONTRACT}. "
+                f"{check}\nЗапиши вердикт в {artifact} по контракту {contract}. "
                 f"Отклоняй только за подтверждённый блокер. {comments} "
                 "При REJECTED comments не может быть пустым. При APPROVED оставь comments пустым. "
                 "Неблокирующие замечания укажи в notes."
@@ -637,7 +713,10 @@ class Dispatcher:
         review = document_review(task["id"], doc) if stage == 1 and doc else None
         if stage == 2 and doc:
             with transaction() as conn:
-                conn.execute("UPDATE stage_runs SET reviewed_document=? WHERE id=?", (doc.name, run_id))
+                conn.execute(
+                    "UPDATE stage_runs SET reviewed_document=?, reviewed_commit=? WHERE id=?",
+                    (doc.name, checkout[2] if checkout else None, run_id),
+                )
         revise = False
         if stage == 1 and doc:
             version = VERSION_RE.search(doc.name)[1]
@@ -888,7 +967,8 @@ class Dispatcher:
                 else:
                     next_stage, status = 2, "queued"
             elif stage == 2:
-                if read_verdict(directory / f"02_doc_review_v{attempt}.json")["status"] == "APPROVED":
+                verdict = read_verdict(directory / f"02_doc_review_v{attempt}.json", document=True, require_context=from_run)
+                if verdict["status"] == "APPROVED":
                     next_stage, status, doc_returns = 3, "queued", 0
                 else:
                     doc_returns += 1

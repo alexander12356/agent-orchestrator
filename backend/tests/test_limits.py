@@ -107,12 +107,15 @@ def test_document_revision_after_answer_ignores_review_of_older_version(client, 
     directory = task_dir(task['id'])
     old_doc = directory / '01_tech_doc_v1.md'
     old_doc.write_text('# Old', encoding='utf-8')
-    verdict = {'status': 'REJECTED', 'comments': ['Old blocker']}
+    verdict = {
+        'status': 'REJECTED', 'comments': ['Old blocker'],
+        'revision_context': [{'acceptance_criterion': 'Specify the container', 'sections': ['Сценарии'], 'source_paths': []}],
+    }
     fake_runner(monkeypatch, [writes('02_doc_review_v1.json', json.dumps(verdict))])
     asyncio.run(dispatcher.run_stage(task['id'], 2))
     with connect() as conn:
         assert conn.execute("SELECT reviewed_document FROM stage_runs WHERE stage=2").fetchone()[0] == old_doc.name
-    assert document_review(task['id'], old_doc) == verdict
+    assert document_review(task['id'], old_doc) == {**verdict, 'reviewed_commit': None}
 
     source = '## Сущности и связи\nТара\n## Алгоритм\nСмена тары\n## Сценарии\nОтвет ожидается.\n'
     doc = directory / '01_tech_doc_v2.md'
@@ -153,6 +156,65 @@ def test_document_revision_after_answer_ignores_review_of_older_version(client, 
         and 'удали их из всего документа, включая разделы вне текущей правки' in prompt
         for prompt in prompts
     )
+
+
+def test_document_review_hands_off_focused_revision(client, agent, idle, monkeypatch, tmp_path):
+    task = make_task(client, agent)
+    task_id = task['id']
+    directory = task_dir(task_id)
+    document = '## Сущности и связи\nТара\n## Алгоритм\nСмена тары\n## Сценарии\nВыбор тары.\n'
+    (directory / '01_tech_doc_v10.md').write_text(document, encoding='utf-8')
+    for version, answer in ((9, 'Earlier decision'), (10, 'Latest decision')):
+        (directory / f'01_answers_v{version}.md').write_text(answer, encoding='utf-8')
+
+    reviewed_commit, current_commit = 'a' * 40, 'b' * 40
+    commits = iter([reviewed_commit, current_commit])
+    monkeypatch.setattr('app.dispatcher.repository_url', lambda *_: 'task-repo')
+    monkeypatch.setattr('app.dispatcher.prepare_checkout', lambda *_: (tmp_path, 'main', next(commits)))
+    monkeypatch.setattr('app.dispatcher.shutil.which', lambda _: None)
+
+    verdict = {
+        'status': 'REJECTED', 'comments': ['Missing fallback path', 'Missing expected result'],
+        'revision_context': [
+            {'acceptance_criterion': 'Uses the previous container', 'sections': ['Алгоритм', 'Смена тары'],
+             'source_paths': ['Game/Assets/Container.cs']},
+            {'acceptance_criterion': 'Shows the current container', 'sections': ['Выбор тары'], 'source_paths': []},
+        ],
+    }
+
+    def revise(cwd):
+        draft, = (cwd / 'logs').glob('tech-doc-*/01_tech_doc_v11.md')
+        assert draft.read_text(encoding='utf-8') == document
+        draft.with_name('01_questions_v11.json').write_text('{"has_questions": false, "questions": []}')
+        return RunResult(0, 'ok')
+
+    with transaction() as conn:
+        conn.execute(
+            "INSERT INTO stage_runs(task_id, stage, attempt, status, started_at) VALUES (?, 1, 10, 'completed', ?)",
+            (task_id, now()),
+        )
+
+    prompts = fake_runner(monkeypatch, [writes('02_doc_review_v1.json', json.dumps(verdict)), revise])
+    asyncio.run(dispatcher.run_stage(task_id, 2))
+    assert current(client, task_id)['current_stage'] == 1
+    asyncio.run(dispatcher.run_stage(task_id, 1))
+
+    review_prompt, revision_prompt = prompts
+    assert 'в том же порядке, что и comments' in review_prompt
+    assert (
+        'Блокер ревью: Missing fallback path\nКритерий приёмки: Uses the previous container\n'
+        f'Затронутые разделы: Алгоритм, Смена тары\nПроверенные исходники (коммит {reviewed_commit}):\n'
+        '- Game/Assets/Container.cs'
+    ) in revision_prompt
+    assert 'Блокер ревью: Missing expected result\nКритерий приёмки: Shows the current container' in revision_prompt
+    assert 'Последний ответ пользователя:' in revision_prompt
+    assert 'Ответ v10:\nLatest decision' in revision_prompt
+    assert revision_prompt.count('Latest decision') == 1
+    assert current_commit in revision_prompt
+    assert 'Коммит ревью отличается от текущего checkout' in revision_prompt
+    assert 'Для архитектурной правки используй полный документ и поиск по checkout' in revision_prompt
+    assert 'удали их из всего документа' not in revision_prompt
+    assert current(client, task_id)['current_stage'] == 2
 
 
 @pytest.mark.parametrize("cli", ["cursor", "zcode", "kimi"])
@@ -294,7 +356,10 @@ def test_missing_result_is_retried_with_what_went_wrong(client, agent, idle, mon
     assert 'Предыдущая попытка этого этапа не завершена: Артефакт 01_tech_doc_v1.md не создан' in prompts[1]
 
 
-@pytest.mark.parametrize('verdict', ['not json', '{"status": "MAYBE"}', '{"status": "REJECTED", "comments": []}'])
+@pytest.mark.parametrize('verdict', [
+    'not json', '{"status": "MAYBE"}', '{"status": "REJECTED", "comments": []}',
+    '{"status": "REJECTED", "comments": ["Fix the flow"]}',
+])
 def test_verdict_outside_the_contract_is_retried(client, agent, idle, monkeypatch, verdict):
     task = make_task(client, agent)
     (task_dir(task['id']) / '01_tech_doc_v1.md').write_text('# Doc')
