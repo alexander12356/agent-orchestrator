@@ -13,7 +13,7 @@ from typing import Any, Awaitable, Callable
 
 from .live_logs import TOOL_PROGRESS_PROMPT, live_log_messages
 from .progress import progress_prompt
-from .search import ZCODE_SEARCH_ARGS
+from .search import ZCODE_SEARCH_ARGS, cursor_search_hook
 from .usage import extract_usage, normalize, objects, recent_kimi_session, recent_zcode_session, zcode_usage
 
 RATE_LIMIT_RE = re.compile(r"rate.?limit|usage.?limit|quota exceeded|\b429\b|try again later", re.I)
@@ -76,13 +76,15 @@ class ProcessRunner:
         custom = config.get("command")
         parts = shlex.split(custom, posix=os.name != "nt") if custom else []
         is_cursor = bool(parts and is_cursor_cli(parts[0].strip('"')))
-        if self.log_callback and (is_cursor or self.tool_event_logs):
-            cli = "cursor" if is_cursor else config["cli"]
-            return await self._run_cli(
-                config, prompt + TOOL_PROGRESS_PROMPT, cwd, env, timeout_minutes, live_log_cli=cli,
-            )
-        async with progress_prompt(prompt, cwd, self.log_callback) as prompt:
-            return await self._run_cli(config, prompt, cwd, env, timeout_minutes)
+        bounded_search = is_cursor and env.get("ORCHESTRATOR_STAGE") == "1" and env.get("ORCHESTRATOR_REPO")
+        with cursor_search_hook(cwd) if bounded_search else contextlib.nullcontext():
+            if self.log_callback and (is_cursor or self.tool_event_logs):
+                cli = "cursor" if is_cursor else config["cli"]
+                return await self._run_cli(
+                    config, prompt + TOOL_PROGRESS_PROMPT, cwd, env, timeout_minutes, live_log_cli=cli,
+                )
+            async with progress_prompt(prompt, cwd, self.log_callback) as prompt:
+                return await self._run_cli(config, prompt, cwd, env, timeout_minutes)
 
     async def _run_cli(
         self, config: dict[str, Any], prompt: str, cwd: Path, env: dict[str, str], timeout_minutes: int,

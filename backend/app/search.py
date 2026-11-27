@@ -1,9 +1,12 @@
 """Bound the output of a repository search before it reaches the agent."""
 
+import json
 import os
 import shlex
 import subprocess
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 
@@ -12,14 +15,44 @@ MAX_BYTES = 3000
 ZCODE_SEARCH_ARGS = ("--disallowed-tools", "Glob,Grep")
 
 
-def search_guidance() -> str:
+def search_command() -> str:
     script = str(Path(__file__).resolve())
     if os.name == "nt":
         python = sys.executable.replace("'", "''")
         script = script.replace("'", "''")
-        command = f"& '{python}' '{script}'"
-    else:
-        command = shlex.join([sys.executable, script])
+        return f"& '{python}' '{script}'"
+    return shlex.join([sys.executable, script])
+
+
+@contextmanager
+def cursor_search_hook(cwd: Path) -> Iterator[None]:
+    directory = cwd / ".cursor"
+    path = directory / "hooks.json"
+    original = path.read_bytes() if path.exists() else None
+    config = json.loads(original) if original is not None else {"version": 1}
+    hooks = config.setdefault("hooks", {}).setdefault("preToolUse", [])
+    hook = {"matcher": "^(Glob|Grep)$", "command": f"{search_command()} --cursor-hook"}
+    if hook in hooks:
+        yield
+        return
+    hooks.insert(0, hook)
+    directory.mkdir(exist_ok=True)
+    configured = json.dumps(config, ensure_ascii=False).encode("utf-8")
+    path.write_bytes(configured)
+    try:
+        yield
+    finally:
+        if path.exists() and path.read_bytes() == configured:
+            if original is None:
+                path.unlink()
+                with suppress(OSError):
+                    directory.rmdir()
+            else:
+                path.write_bytes(original)
+
+
+def search_guidance() -> str:
+    command = search_command()
     return (
         "Начни с ТЗ. При доработке прочитай затронутые разделы техдокумента и замечания ревью. "
         "Возьми из них имена классов, "
@@ -42,6 +75,16 @@ def search_guidance() -> str:
 
 
 def main(command: list[str]) -> int:
+    if command == ["--cursor-hook"]:
+        if os.environ.get("ORCHESTRATOR_STAGE") == "1" and os.environ.get("ORCHESTRATOR_REPO"):
+            print(json.dumps({
+                "permission": "deny",
+                "user_message": "На этапе 1 используй команду поиска с ограниченной выдачей из задания.",
+                "agent_message": f"Для поиска используй {search_command()} с rg или git.",
+            }))
+        else:
+            print('{"permission": "allow"}')
+        return 0
     if not command or command[0] not in ("rg", "git"):
         print("Usage: search.py rg <args> | git <args>", file=sys.stderr)
         return 2

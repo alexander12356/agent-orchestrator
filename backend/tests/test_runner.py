@@ -107,6 +107,27 @@ def test_explicit_repo_placeholder_is_not_duplicated():
     assert '/mirrors/zelya' in command
 
 
+def test_cursor_search_hook_is_scoped_to_documentation(monkeypatch, tmp_path):
+    hook_path = tmp_path / ".cursor" / "hooks.json"
+    hook_path.parent.mkdir()
+    original = '{"version": 1, "hooks": {"preToolUse": [{"command": "./existing.sh"}]}}'
+    hook_path.write_text(original, encoding="utf-8")
+    config = {"cli": "custom", "command": "agent --print {prompt}"}
+    seen = []
+
+    async def run_cli(self, config, prompt, cwd, env, timeout_minutes, **kwargs):
+        seen.append(json.loads(hook_path.read_text(encoding="utf-8"))["hooks"]["preToolUse"])
+
+    monkeypatch.setattr(ProcessRunner, "_run_cli", run_cli)
+    for stage in ("1", "2"):
+        env = {"ORCHESTRATOR_STAGE": stage, "ORCHESTRATOR_REPO": "/checkout"}
+        asyncio.run(ProcessRunner().run(config, "prompt", tmp_path, env, 1))
+        assert hook_path.read_text(encoding="utf-8") == original
+    assert seen[0][0]["matcher"] == "^(Glob|Grep)$"
+    assert seen[0][0]["command"].endswith(" --cursor-hook")
+    assert seen[0][1:] == seen[1] == [{"command": "./existing.sh"}]
+
+
 def test_live_log_publishes_agent_updates_before_the_cli_exits(monkeypatch, tmp_path):
     script = tmp_path / "cli.py"
     script.write_text(
