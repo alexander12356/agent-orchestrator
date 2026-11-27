@@ -245,6 +245,15 @@ class UnityWorker:
             if code == 0:
                 await self.checked(["git", "branch", "-D", branch], self.repo)
             await self.checked(["git", "worktree", "add", "-b", branch, str(path), "origin/main"], self.repo)
+        else:
+            if not (path / ".git").is_file():
+                raise RuntimeError(f"Каталог {path} существует без метаданных Git worktree. Файлы сохранены.")
+            code, checkout = await self.execute(
+                ["git", "rev-parse", "--show-toplevel", "--symbolic-full-name", "HEAD"], path,
+            )
+            root, _, ref = checkout.strip().partition("\n")
+            if code or ref != f"refs/heads/{branch}" or Path(root.rstrip("\r")).resolve() != path:
+                raise RuntimeError(f"Каталог {path} не является рабочей копией ветки {branch}. Файлы сохранены.")
         await self.prepare_library(path)
         return path
 

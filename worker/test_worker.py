@@ -130,7 +130,13 @@ def test_prepare_library_is_local_to_the_worktree(tmp_path):
 def test_existing_worktree_is_not_reset(tmp_path):
     worker = make_worker(tmp_path)
     path = tmp_path / 'worktrees' / 'task-1'
-    path.mkdir(parents=True)
+
+    def git(*args):
+        subprocess.run(['git', *args], cwd=tmp_path, check=True, capture_output=True)
+
+    git('init', '-b', 'main')
+    git('-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '--allow-empty', '-m', 'initial')
+    git('worktree', 'add', '-b', 'feat/task-1', str(path))
     marker = path / 'changes.txt'
     marker.write_text('keep', encoding='utf-8')
 
@@ -143,6 +149,26 @@ def test_existing_worktree_is_not_reset(tmp_path):
     result = asyncio.run(worker.prepare_worktree(1, 'feat/task-1'))
     assert result == path
     assert marker.read_text(encoding='utf-8') == 'keep'
+    with pytest.raises(RuntimeError, match='не является рабочей копией ветки'):
+        asyncio.run(worker.prepare_worktree(1, 'feat/task-2'))
+
+
+def test_incomplete_worktree_preserves_files_and_fails_before_preparing_library(tmp_path):
+    worker = make_worker(tmp_path)
+    path = worker.worktrees / 'task-1'
+    path.mkdir(parents=True)
+    marker = path / 'changes.txt'
+    marker.write_text('keep', encoding='utf-8')
+
+    async def checked(command, cwd=None):
+        assert command == ['git', 'fetch', 'origin', 'main']
+        return ''
+
+    worker.checked = checked
+    with pytest.raises(RuntimeError, match='существует без метаданных Git worktree'):
+        asyncio.run(worker.prepare_worktree(1, 'feat/task-1'))
+    assert marker.read_text(encoding='utf-8') == 'keep'
+    assert not (path / 'Library').exists()
 
 
 def test_worktree_is_created_on_issue_key_branch(tmp_path):
