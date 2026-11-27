@@ -1,3 +1,4 @@
+export type TokenUsage = { input_tokens?: number; cache_tokens?: number; output_tokens?: number; usage_partial?: boolean; tokens_estimated?: boolean };
 export type ModelConfig = { cli: 'claude' | 'codex' | 'gemini' | 'aider' | 'kimi' | 'zcode' | 'custom'; model: string; reasoning_effort?: string; environment: 'server' | 'worker'; command?: string | null };
 export type Agent = { id: number; name: string; avatar_url: string; role_prompt: string; concurrency_limit: number; primary_config: ModelConfig; fallback_configs: ModelConfig[]; fallback_triggers: { rate_limit: boolean; exit_code: boolean; timeout: boolean; timeout_minutes: number } };
 export type Dependency = { id: number; title: string; merged_to_main: boolean };

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api } from './api';
 import ArtifactPage from './ArtifactPage';
@@ -52,6 +52,36 @@ describe('Inspector', () => {
     render(<Inspector {...props} tab="stage" />);
     expect(screen.queryByRole('heading', { name: 'Артефакты' })).not.toBeInTheDocument();
     expect(screen.getByText('Live Logs')).toBeInTheDocument();
+  });
+
+  it('sums all stage retries by token category and marks incomplete usage', () => {
+    const run = { id: 1, task_id: 7, stage: 1, attempt: 1, is_fallback: false, input_tokens: 100, cache_tokens: 40, output_tokens: 10, tokens_estimated: false, status: 'completed', started_at: task.created_at };
+    render(<Inspector {...props} task={{ ...task, runs: [
+      run,
+      { ...run, id: 2, attempt: 2, input_tokens: 7, cache_tokens: 3, output_tokens: 2, usage_partial: true },
+      { ...run, id: 3, stage: 2, input_tokens: 999, cache_tokens: 999, output_tokens: 999 },
+    ] }} tab="stage" />);
+
+    const summary = within(screen.getByRole('region', { name: 'Итого по этапу' }));
+    expect(summary.getByText('Всего · попыток: 2')).toBeInTheDocument();
+    expect(summary.getByText('≥ 162')).toBeInTheDocument();
+    expect(summary.getByText('Вход 107')).toBeInTheDocument();
+    expect(summary.getByText('Кэш 43')).toBeInTheDocument();
+    expect(summary.getByText('Выход 12')).toBeInTheDocument();
+    expect(summary.getByText('Неполные данные')).toBeInTheDocument();
+  });
+
+  it('does not present missing stage usage as a confirmed zero', () => {
+    const run = { id: 1, task_id: 7, stage: 1, attempt: 1, is_fallback: false, input_tokens: 0, cache_tokens: 0, output_tokens: 0, tokens_estimated: true, usage_partial: true, status: 'error', started_at: task.created_at };
+    render(<Inspector {...props} task={{ ...task, runs: [run] }} tab="stage" />);
+
+    const summary = within(screen.getByRole('region', { name: 'Итого по этапу' }));
+    expect(summary.getByText('—')).toBeInTheDocument();
+    expect(summary.getByText('Вход —')).toBeInTheDocument();
+    expect(summary.getByText('Кэш —')).toBeInTheDocument();
+    expect(summary.getByText('Выход —')).toBeInTheDocument();
+    expect(summary.queryByText(/≥ 0/)).not.toBeInTheDocument();
+    expect(summary.getByText('Неполные данные')).toBeInTheDocument();
   });
 
   it('shows the last sent prompt and all artifact links in the description', async () => {

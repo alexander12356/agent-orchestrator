@@ -1,4 +1,4 @@
-import type { Task } from './types';
+import type { Task, TokenUsage } from './types';
 
 const base = '/api';
 
@@ -20,5 +20,11 @@ export async function api<T>(path: string, options?: RequestInit): Promise<T> {
 }
 
 export const spentTokens = (run: { input_tokens?: number; output_tokens?: number; cache_tokens?: number }) => (run.input_tokens || 0) + (run.output_tokens || 0) + (run.cache_tokens || 0);
+export const sumUsage = (runs: TokenUsage[]): TokenUsage => ({
+  input_tokens: runs.reduce((sum, run) => sum + (run.input_tokens || 0), 0),
+  cache_tokens: runs.reduce((sum, run) => sum + (run.cache_tokens || 0), 0),
+  output_tokens: runs.reduce((sum, run) => sum + (run.output_tokens || 0), 0),
+  usage_partial: runs.some(run => run.usage_partial || run.tokens_estimated),
+});
 export const fmtTokens = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n || 0);
 export const stageName = (stage: number, status?: string) => status === 'open' ? 'Open' : status === 'waiting_answer' ? '1.5. Ожидает ответа по ТЗ' : status === 'needs_human' ? `Нужен человек (этап ${stage})` : ['Ожидает влития в main', 'Тех. документация', 'Ревью документации', 'Реализация', 'Ревью реализации', 'Готово к PR', 'Завершено'][stage];

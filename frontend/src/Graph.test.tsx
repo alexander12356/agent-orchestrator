@@ -41,6 +41,26 @@ it('updates the attempt count for each automated stage from its runs', () => {
   expect(stage('Ревью документации').getByText('Попыток: 2')).toBeInTheDocument();
 });
 
+it('shows the all-attempt total and token categories on each stage node', () => {
+  vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
+  const task: Task = {
+    id: 1, title: 'Задача', status: 'running', current_stage: 2,
+    description: '', branch_name: 'feat/task-1', merged_to_main: false,
+    stage_agents: {}, dependencies: [], total_tokens: 0, created_at: '2026-11-26T00:00:00Z',
+  };
+  const run: StageRun = {
+    id: 1, task_id: task.id, stage: 1, attempt: 1, status: 'completed', started_at: task.created_at,
+    is_fallback: false, input_tokens: 100, output_tokens: 10, cache_tokens: 40, tokens_estimated: false,
+  };
+  render(<Graph task={{ ...task, runs: [run, { ...run, id: 2, stage: 2, input_tokens: 999 }] }} tasks={[task]} agents={[]} reload={vi.fn()} selectTask={vi.fn()} notify={vi.fn()}/>);
+
+  const stage = within(screen.getByText('Тех. документация').closest('.react-flow__node') as HTMLElement);
+  expect(stage.getByText('150')).toBeInTheDocument();
+  expect(stage.getByText('Вход 100')).toBeInTheDocument();
+  expect(stage.getByText('Кэш 40')).toBeInTheDocument();
+  expect(stage.getByText('Выход 10')).toBeInTheDocument();
+});
+
 it('shows a question on the task and only on the stage awaiting an answer', () => {
   vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} });
   const task: Task = {

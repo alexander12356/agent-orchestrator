@@ -1,6 +1,5 @@
 import { fmtTokens } from './api';
-
-type Usage = { input_tokens?: number; cache_tokens?: number; output_tokens?: number; usage_partial?: boolean };
+import type { TokenUsage as Usage } from './types';
 
 const categories = [
   ['input_tokens', 'Вход', 'Вход без чтения из кэша', 'text-sky-300'],

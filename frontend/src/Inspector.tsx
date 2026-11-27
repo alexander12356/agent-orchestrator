@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import TaskDescription from './TaskDescription';
 import DocumentationUsage from './DocumentationUsage';
 import Markdown from './Markdown';
-import { api, canPausePipeline, canStartPipeline, fmtTokens, spentTokens, stageName } from './api';
+import { api, canPausePipeline, canStartPipeline, fmtTokens, spentTokens, stageName, sumUsage } from './api';
 import { artifactUrl } from './ArtifactPage';
 import { Artifact, Task } from './types';
 
@@ -75,6 +75,9 @@ export default function Inspector({ task, stage, tab, onTabChange, reload, notif
     try { await api(`/tasks/${task.id}/answer`, { method: 'POST', body: JSON.stringify({ answer }) }); setAnswer(''); notify('Ответ сохранен, документация перезапущена'); reload(); } catch (e) { notify((e as Error).message); }
   };
   const runs = (task.runs || []).filter(r => r.stage === stage);
+  const usage = sumUsage(runs);
+  const total = spentTokens(usage);
+  const missing = !!usage.usage_partial && total === 0;
   const nextStage = task.status === 'open' ? 1 : task.current_stage;
   const pipelineAvailable = canStartPipeline(task);
   const stageAvailable = pipelineAvailable || task.status === 'waiting_pr';
@@ -112,6 +115,13 @@ export default function Inspector({ task, stage, tab, onTabChange, reload, notif
     </>}
     {tab === 'stage' && <>
       <div className="mb-5"><div className="mb-1 text-[10px] uppercase tracking-widest text-indigo-400">Инспектор · этап {stage}</div><h2 className="text-base font-semibold">{stageName(stage)}</h2></div>
+      {runs.length > 0 && <section aria-label="Итого по этапу" className="mb-5">
+        <h3 className="mb-2 flex items-center gap-2 text-xs font-medium text-slate-300"><Flame size={14}/>Итого по этапу</h3>
+        <div className="space-y-2 rounded-lg border border-slate-800 bg-slate-900/50 p-3 text-[11px]">
+          <div className="flex items-center justify-between gap-2"><span>Всего · попыток: {runs.length}</span><span className="text-orange-300">{missing ? '—' : <>{usage.usage_partial && '≥ '}{fmtTokens(total)}</>}</span></div>
+          <TokenUsage usage={usage}/>
+        </div>
+      </section>}
       <section className="mb-5 space-y-2 text-[11px]">
         <h3 className="mb-2 font-medium text-slate-300">Пути и ссылки</h3>
         <div className="flex gap-2 break-all text-slate-500"><FolderGit2 size={14} className="shrink-0"/><span>{task.branch_name}</span>{task.pr_url && <a className="text-indigo-400" href={task.pr_url} target="_blank"><ExternalLink size={13}/></a>}</div>

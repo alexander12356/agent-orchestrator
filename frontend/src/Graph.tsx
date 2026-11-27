@@ -2,12 +2,12 @@ import TokenUsage from './TokenUsage';
 import { Background, Controls, Edge, Handle, MarkerType, Node, NodeProps, Position, ReactFlow } from '@xyflow/react';
 import { CheckCircle2, Circle, CircleAlert, CirclePause, Clock, Flame, GitPullRequest, LoaderCircle, Lock, UserRound } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { fmtTokens, spentTokens } from './api';
+import { fmtTokens, spentTokens, sumUsage } from './api';
 import { Avatar, QuestionIcon } from './components';
 import ArtifactEdge from './ArtifactEdge';
 import Inspector, { InspectorTab } from './Inspector';
 import RevisionWindow from './RevisionWindow';
-import { Agent, Task } from './types';
+import { Agent, Task, TokenUsage as Usage } from './types';
 
 const titles = ['Тех. документация', 'Ревью документации', 'Реализация', 'Ревью реализации', 'PR · Человек'];
 const envs = ['VDS', 'VDS', 'Local Unity Worker', 'VDS', 'GitHub'];
@@ -36,7 +36,7 @@ type StageGraphNode = Node<{
   model?: string;
   status: string;
   attempts: number;
-  tokens: number;
+  usage: Usage | null;
   fallback: boolean;
   human: boolean;
 }, 'stage'>;
@@ -45,6 +45,8 @@ function StageNode({ data: d, selected }: NodeProps<StageGraphNode>) {
   const { icon: StatusIcon, label, color } = stageStatuses[d.status] ?? upcomingStatus;
   const running = d.status === 'running';
   const attention = ['running', 'waiting_answer', 'needs_human'].includes(d.status);
+  const total = spentTokens(d.usage ?? {});
+  const missing = !!d.usage?.usage_partial && total === 0;
   return <div className={`card w-52 p-4 transition ${selected ? '!border-indigo-300 !bg-indigo-500/10 shadow-lg shadow-indigo-950 ring-2 ring-indigo-400/40' : attention ? '!border-amber-400/70' : d.status === 'done' ? '!border-emerald-700/70' : ''}`}>
     <Handle id="forward-target" type="target" position={Position.Top} className="!bg-slate-500"/>
     <Handle id="forward-source" type="source" position={Position.Right} className="!bg-slate-500"/>
@@ -61,8 +63,9 @@ function StageNode({ data: d, selected }: NodeProps<StageGraphNode>) {
         <div className={color}>{label}{d.fallback && ' · Fallback'}</div>
         {!d.human && <div className="mt-1 text-slate-400">Попыток: {d.attempts}</div>}
       </div>
-      <span className="flex shrink-0 items-center gap-1 text-orange-300/70"><Flame size={11}/>{fmtTokens(d.tokens)}</span>
+      <span className="flex shrink-0 items-center gap-1 text-orange-300/70" title={d.usage?.usage_partial ? 'Минимальный подтверждённый расход по всем попыткам' : 'Подтверждённый расход по всем попыткам'}><Flame size={11}/>{missing ? '—' : <>{d.usage?.usage_partial && '≥ '}{fmtTokens(total)}</>}</span>
     </div>
+    {d.usage && <div className="mt-2 border-t border-slate-800 pt-2"><TokenUsage usage={d.usage}/></div>}
   </div>;
 }
 
@@ -92,7 +95,7 @@ export default function Graph({ task, tasks, agents, reload, selectTask, notify 
       : undefined;
     const currentStage = task.status === 'blocked_main' && task.current_stage === 0 ? 1 : task.current_stage;
     const status = stage === currentStage ? task.status : stage < currentStage ? 'done' : '';
-    return { id: String(stage), type: 'stage', selected: stage === selectedStage, position: { x: index * 244, y: index * 204 }, data: { title, env: envs[index], agent, model, status, attempts: stageRuns.length, tokens: stageRuns.reduce((sum, r) => sum + spentTokens(r), 0), fallback: latestRun?.is_fallback ?? false, human: stage === 5 } };
+    return { id: String(stage), type: 'stage', selected: stage === selectedStage, position: { x: index * 244, y: index * 204 }, data: { title, env: envs[index], agent, model, status, attempts: stageRuns.length, usage: stageRuns.length ? sumUsage(stageRuns) : null, fallback: latestRun?.is_fallback ?? false, human: stage === 5 } };
   }), [task, runs, agents, selectedStage]);
   const latest = (stage: number) => runs.filter(r => r.stage === stage && r.status === 'completed').at(-1);
   const openArtifactEdge = useCallback((id: string, source: number, target: number) => {
