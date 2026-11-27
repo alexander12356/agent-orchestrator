@@ -6,6 +6,7 @@ from contextlib import closing
 from pathlib import Path, PureWindowsPath
 
 FIELDS = ("input_tokens", "cache_tokens", "output_tokens")
+USAGE_FIELDS = (*FIELDS, "cache_write_tokens")
 
 
 def objects(lines):
@@ -49,10 +50,15 @@ def normalize(usage):
             return {}
         cache = included
         incoming -= cache
+        writes = 0
     else:
         cache = first("cache_read_input_tokens", "cacheReadTokens", "inputCacheRead") or 0
-        incoming += first("cache_creation_input_tokens", "cacheWriteTokens", "inputCacheCreation") or 0
-    return dict(input_tokens=incoming, cache_tokens=cache, output_tokens=outgoing, estimated=False)
+        writes = first("cache_creation_input_tokens", "cacheWriteTokens", "inputCacheCreation") or 0
+        incoming += writes
+    result = dict(input_tokens=incoming, cache_tokens=cache, output_tokens=outgoing, estimated=False)
+    if writes:
+        result["cache_write_tokens"] = writes
+    return result
 
 
 def kimi_session_state(session, cwd):
@@ -86,8 +92,9 @@ def kimi_usage(session, cwd, since=None):
                     usage = normalize(event.get("usage"))
                     if not usage:
                         return {}
-                    for key in FIELDS:
-                        totals[key] += usage[key]
+                    for key in USAGE_FIELDS:
+                        if key in usage:
+                            totals[key] = totals.get(key, 0) + usage[key]
                     found = True
         return dict(**totals, estimated=False) if found else {}
     except (OSError, ValueError, KeyError, TypeError):
@@ -178,7 +185,8 @@ def extract_usage(output, cwd=None, kimi_home=None, *, kimi_since=None):
         usage = normalize(event.get("usage") or (nested.get("usage") if isinstance(nested, dict) else None) or event)
         if usage:
             if kind == "turn.completed" and result:
-                for key in FIELDS:
-                    usage[key] += result[key]
+                for key in USAGE_FIELDS:
+                    if key in result:
+                        usage[key] = usage.get(key, 0) + result[key]
             result = usage
     return result

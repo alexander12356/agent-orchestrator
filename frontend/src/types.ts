@@ -1,7 +1,32 @@
 export type ModelConfig = { cli: 'claude' | 'codex' | 'gemini' | 'aider' | 'kimi' | 'zcode' | 'custom'; model: string; reasoning_effort?: string; environment: 'server' | 'worker'; command?: string | null };
 export type Agent = { id: number; name: string; avatar_url: string; role_prompt: string; concurrency_limit: number; primary_config: ModelConfig; fallback_configs: ModelConfig[]; fallback_triggers: { rate_limit: boolean; exit_code: boolean; timeout: boolean; timeout_minutes: number } };
 export type Dependency = { id: number; title: string; merged_to_main: boolean };
-export type Task = { id: number; title: string; description: string; external_issue_id?: string; external_issue_key?: string; external_issue_url?: string; project?: string; milestone?: string; sprint?: string; repository_url?: string; current_stage: number; status: string; branch_name: string; pr_url?: string; worktree_path?: string; merged_to_main: boolean; stage_agents: Record<number, number>; dependencies: Dependency[]; current_agent?: Agent; total_tokens: number; input_tokens?: number; cache_tokens?: number; output_tokens?: number; usage_partial?: boolean; token_budget?: number | null; token_budget_effective?: number; hold_reason?: string | null; doc_returns?: number; code_returns?: number; runs?: StageRun[]; created_at: string };
+export type Task = { id: number; title: string; description: string; external_issue_id?: string; external_issue_key?: string; external_issue_url?: string; project?: string; milestone?: string; sprint?: string; repository_url?: string; current_stage: number; status: string; branch_name: string; pr_url?: string; worktree_path?: string; merged_to_main: boolean; stage_agents: Record<number, number>; dependencies: Dependency[]; current_agent?: Agent; total_tokens: number; input_tokens?: number; cache_tokens?: number; output_tokens?: number; usage_partial?: boolean; token_budget?: number | null; token_budget_effective?: number; hold_reason?: string | null; doc_returns?: number; code_returns?: number; runs?: StageRun[]; documentation_usage?: DocumentationUsage | null; created_at: string };
 export type StageRun = { id: number; task_id: number; stage: number; attempt: number; agent_id?: number; cli_used?: string; model_used?: string; sent_prompt?: string | null; is_fallback: boolean; artifact_path?: string; input_tokens: number; output_tokens: number; cache_tokens: number; tokens_estimated: boolean; usage_partial?: boolean; status: string; started_at: string; finished_at?: string; error?: string };
+export type DocumentationLaunch = {
+  id: number;
+  kind: 'draft' | 'revision' | 'legacy' | 'unrecorded';
+  cli: string | null;
+  model: string | null;
+  model_mixed?: boolean;
+  is_fallback: boolean;
+  input_tokens: number;
+  cache_tokens: number;
+  output_tokens: number;
+  usage_partial: boolean;
+  cost_usd: number | null;
+  status: string;
+};
+export type DocumentationUsage = {
+  attempts: { attempt: number; error: string | null; launches: DocumentationLaunch[] }[];
+  accepted_document: string | null;
+  accepted_attempt: number | null;
+  cost_usd: number | null;
+  cost_partial: boolean;
+  doc_returns: number;
+  review_history_partial: boolean;
+  implementation_reviews: { attempt: number; artifact: string; status: string; comments: string[]; notes: string[] }[];
+};
+export type ModelPrices = { updated_at: string | null; model_count: number };
 export type Artifact = { name: string; path: string; size: number };
 export type Settings = { tracker_api_token: string; yougile_project: string; yougile_board: string; yougile_sticker: string; yougile_team_url: string; tracker_webhook_secret: string; yougile_webhook_id: string; git_webhook_secret: string; worker_token: string; repository_url: string; git_webhook_url: string; tracker_webhook_url: string; worker_websocket_url: string; max_auto_retries: number; max_returns: number; task_token_budget: number };

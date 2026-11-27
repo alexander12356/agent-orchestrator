@@ -726,6 +726,9 @@ class Dispatcher:
                     (doc.name, checkout[2] if checkout else None, run_id),
                 )
         revise = False
+        documentation_kind = "revision" if stage == 1 and doc and (
+            review or numbered_versions(directory, "01_answers_v*.md")
+        ) else "draft"
         if stage == 1 and doc:
             version = VERSION_RE.search(doc.name)[1]
             has_feedback = (directory / f"01_answers_v{version}.md").is_file() or (
@@ -860,15 +863,36 @@ class Dispatcher:
                         "Используй эти пути для вывода и текущие переменные окружения для локального checkout.\n"
                         + (search_guidance() if checkout else "")
                     )
-                result = await runner.run(
-                    config, cli_prompt, directory, env, agent["fallback_triggers"].get("timeout_minutes", 20),
-                )
+                launch_id = None
+                if stage == 1:
+                    with connect() as conn:
+                        launch_id = conn.execute(
+                            "INSERT INTO documentation_launches(run_id, kind, cli, model, is_fallback) VALUES (?, ?, ?, ?, ?)",
+                            (run_id, documentation_kind, config["cli"], config.get("model") or None, int(index > 0)),
+                        ).lastrowid
+                try:
+                    result = await runner.run(
+                        config, cli_prompt, directory, env, agent["fallback_triggers"].get("timeout_minutes", 20),
+                    )
+                except (asyncio.CancelledError, Exception):
+                    if launch_id is not None:
+                        with connect() as conn:
+                            conn.execute("UPDATE documentation_launches SET status='interrupted' WHERE id=?", (launch_id,))
+                    raise
                 with transaction() as conn:
+                    partial = result.estimated or result.timed_out or result.rate_limited
                     conn.execute(
                         "UPDATE stage_runs SET input_tokens=input_tokens+?, cache_tokens=cache_tokens+?, "
                         "output_tokens=output_tokens+?, usage_partial=MAX(usage_partial, ?) WHERE id=?",
-                        (result.input_tokens, result.cache_tokens, result.output_tokens, int(result.estimated), run_id),
+                        (result.input_tokens, result.cache_tokens, result.output_tokens, int(partial), run_id),
                     )
+                    if launch_id is not None:
+                        conn.execute(
+                            "UPDATE documentation_launches SET model=COALESCE(?, model), model_mixed=?, input_tokens=?, "
+                            "cache_tokens=?, cache_write_tokens=?, output_tokens=?, usage_partial=?, status='finished' WHERE id=?",
+                            (result.model, int(result.model_mixed), result.input_tokens, result.cache_tokens,
+                             result.cache_write_tokens, result.output_tokens, int(partial), launch_id),
+                        )
                 if task["id"] in self.stop_requested:
                     if fingerprint and result.session_id:
                         record_session(result.session_id)
@@ -889,6 +913,10 @@ class Dispatcher:
                         draft_questions.replace(directory / draft_questions.name)
                         draft.replace(artifact)
                 success = result.exit_code == 0 and not validation_error and artifact.exists()
+                if launch_id is not None:
+                    with connect() as conn:
+                        conn.execute("UPDATE documentation_launches SET status=? WHERE id=?",
+                                     ("completed" if success else "error", launch_id))
                 if success:
                     if session_id:
                         next_session = json.dumps({
@@ -979,6 +1007,15 @@ class Dispatcher:
                 verdict = read_verdict(directory / f"02_doc_review_v{attempt}.json", document=True, require_context=from_run)
                 if verdict["status"] == "APPROVED":
                     next_stage, status, doc_returns = 3, "queued", 0
+                    reviewed = conn.execute(
+                        "SELECT reviewed_document FROM stage_runs WHERE task_id=? AND stage=2 AND attempt=?",
+                        (task_id, attempt),
+                    ).fetchone()
+                    accepted = reviewed["reviewed_document"] if reviewed else None
+                    if not accepted and (document := latest_document(task_id, directory)):
+                        accepted = document.name
+                    conn.execute("UPDATE tasks SET accepted_document=?, document_accepted_at=? WHERE id=?",
+                                 (accepted, now(), task_id))
                 else:
                     doc_returns += 1
                     next_stage, status = 1, "queued"
@@ -1204,13 +1241,17 @@ class Dispatcher:
     async def force_approve(self, task_id: int, stage: int) -> None:
         if stage not in (1, 2, 4):
             raise ValueError("Принудительно можно утвердить только этапы 1, 2 и 4")
-        with connect() as conn:
+        with transaction() as conn:
             task = conn.execute("SELECT status, current_stage, single_stage FROM tasks WHERE id=?", (task_id,)).fetchone()
             if not task or task["status"] in ("open", "blocked_main", "done", "paused") or stage != task["current_stage"]:
                 raise ValueError("Утвердить можно только текущий этап задач в работе")
             next_stage, status = {1: (2, "queued"), 2: (3, "queued"), 4: (5, "waiting_pr")}[stage]
             if status == "queued" and task["single_stage"]:
                 status = "stage_ready"
+            if stage == 2:
+                document = latest_document(task_id, task_dir(task_id))
+                conn.execute("UPDATE tasks SET accepted_document=?, document_accepted_at=? WHERE id=?",
+                             (document.name if document else None, now(), task_id))
             conn.execute(
                 "UPDATE tasks SET current_stage=?, status=?, auto_retries=0, hold_reason=NULL, doc_returns=COALESCE(?, doc_returns), code_returns=COALESCE(?, code_returns), updated_at=? WHERE id=?",
                 (next_stage, status, 0 if stage in (1, 2) else None, 0 if stage == 4 else None, now(), task_id),

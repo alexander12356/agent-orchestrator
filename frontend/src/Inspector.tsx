@@ -2,6 +2,7 @@ import TokenUsage from './TokenUsage';
 import { Check, ExternalLink, Flame, FolderGit2, Hand, Pause, Play, RotateCcw, Send, TerminalSquare } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import TaskDescription from './TaskDescription';
+import DocumentationUsage from './DocumentationUsage';
 import Markdown from './Markdown';
 import { api, canPausePipeline, canStartPipeline, fmtTokens, spentTokens, stageName } from './api';
 import { artifactUrl } from './ArtifactPage';
@@ -89,6 +90,7 @@ export default function Inspector({ task, stage, tab, onTabChange, reload, notif
     {task.status === 'needs_human' && <section className="mb-5 rounded-lg border border-amber-700/60 bg-amber-950/30 p-3 text-xs"><div className="flex items-start gap-2 text-amber-200"><Hand size={15} className="mt-0.5 shrink-0"/><div><b>Нужно решение человека</b>{task.hold_reason && <p className="mt-1 text-amber-200/80">{task.hold_reason}</p>}</div></div><button disabled={busy} className="btn btn-primary mt-3 w-full" onClick={() => action('resume')}><Play size={14}/>Продолжить</button></section>}
     {tab === 'description' && <>
       <TaskDescription task={task}/>
+      {task.documentation_usage && <DocumentationUsage taskId={task.id} usage={task.documentation_usage}/>}
       <section className="mb-5">
         <h3 className="mb-2 text-xs font-medium text-slate-300">Последний отправленный промпт</h3>
         {lastSent ? <>
@@ -116,7 +118,7 @@ export default function Inspector({ task, stage, tab, onTabChange, reload, notif
         {stage === 3 && task.worktree_path && <div className="break-all text-slate-500">Worktree: {task.worktree_path}</div>}
       </section>
       {task.status === 'waiting_answer' && stage === 1 && <section className="mb-5"><textarea rows={3} value={answer} onChange={e => setAnswer(e.target.value)} placeholder="Ответ на вопросы бота..."/><button onClick={submitAnswer} className="btn btn-primary mt-2 w-full"><Send size={14}/>Отправить ответ</button></section>}
-      <section className="mb-5"><h3 className="mb-2 flex items-center gap-2 text-xs font-medium text-slate-300"><Flame size={14}/>Расход токенов</h3>{runs.length ? <div className="space-y-2">{runs.map(r => <div key={r.id} className="rounded-lg border border-slate-800 bg-slate-900/50 p-3 text-[10px]"><div className="flex justify-between"><span>Попытка {r.attempt} {r.is_fallback && '· Fallback'}</span><span className="text-orange-300">{r.usage_partial && '≥ '}{fmtTokens(spentTokens(r))}</span></div><div className="mt-1 text-slate-600">{r.cli_used} {r.model_used}</div><TokenUsage usage={r}/>{r.error && <div className="mt-2 text-rose-400">{r.error}</div>}</div>)}</div> : <p className="text-[11px] text-slate-600">Запусков еще не было</p>}</section>
+      {stage === 1 && task.documentation_usage ? <DocumentationUsage taskId={task.id} usage={task.documentation_usage}/> : <section className="mb-5"><h3 className="mb-2 flex items-center gap-2 text-xs font-medium text-slate-300"><Flame size={14}/>Расход токенов</h3>{runs.length ? <div className="space-y-2">{runs.map(r => <div key={r.id} className="rounded-lg border border-slate-800 bg-slate-900/50 p-3 text-[10px]"><div className="flex justify-between"><span>Попытка {r.attempt} {r.is_fallback && '· Fallback'}</span><span className="text-orange-300">{r.usage_partial && '≥ '}{fmtTokens(spentTokens(r))}</span></div><div className="mt-1 text-slate-600">{r.cli_used} {r.model_used}</div><TokenUsage usage={r}/>{r.error && <div className="mt-2 text-rose-400">{r.error}</div>}</div>)}</div> : <p className="text-[11px] text-slate-600">Запусков еще не было</p>}</section>}
       <section className="mb-5"><h3 className="mb-2 flex items-center gap-2 text-xs font-medium text-slate-300"><TerminalSquare size={14}/>Live Logs</h3><pre ref={logRef} className="scrollbar h-40 overflow-auto whitespace-pre-wrap rounded-lg border border-slate-800 bg-[#050912] p-3 font-mono text-[10px] leading-relaxed text-emerald-300/70">{logs || 'Ожидание вывода...'}</pre></section>
       <section className="flex flex-wrap gap-2 border-t border-slate-800 pt-4">
         {stage <= 4 && <>

@@ -52,6 +52,9 @@ class RunResult:
     rate_limited: bool = False
     timed_out: bool = False
     session_id: str | None = None
+    cache_write_tokens: int = 0
+    model: str | None = None
+    model_mixed: bool = False
 
 
 @dataclass
@@ -109,6 +112,37 @@ class ProcessRunner:
             if not usage and Path(command[0]).stem.lower() == "zcode":
                 usage = zcode_usage(cwd, started, datetime.now(UTC))
             return usage or {"estimated": True}
+
+        def reported_models(output):
+            if env.get("ORCHESTRATOR_STAGE") != "1":
+                return {}
+            models = set()
+            initial_model = None
+            for event in objects(output.splitlines()):
+                if event.get("type") == "system" and event.get("subtype") == "init":
+                    initial_model = event.get("model")
+                if event.get("type") == "result":
+                    model_usage = event.get("modelUsage")
+                    if isinstance(model_usage, dict):
+                        models.update(model_usage)
+                    if isinstance(event.get("model"), str):
+                        models.add(event["model"])
+            if self.tracked_cli == "zcode":
+                model = zcode_result(output).get("model")
+                if isinstance(model, str):
+                    models.add(model)
+            if len(models) > 1:
+                return {"model_mixed": True}
+            explicit_model = None
+            for index, arg in enumerate(command[:-1]):
+                if arg == "--model" and command[index + 1] != prompt:
+                    explicit_model = command[index + 1]
+                elif arg != prompt and arg.startswith("--model="):
+                    explicit_model = arg.removeprefix("--model=")
+            if command[-1] != prompt and command[-1].startswith("--model="):
+                explicit_model = command[-1].removeprefix("--model=")
+            model = next(iter(models), initial_model or explicit_model)
+            return {"model": model} if isinstance(model, str) and model.strip() else {}
         try:
             process = await asyncio.create_subprocess_exec(
                 *command,
@@ -120,7 +154,7 @@ class ProcessRunner:
                 start_new_session=os.name == "posix",
             )
         except FileNotFoundError:
-            return RunResult(127, f"CLI не найден: {command[0]}\n")
+            return RunResult(127, f"CLI не найден: {command[0]}\n", estimated=True)
         if self.on_process:
             self.on_process(process)
         lines: list[str] = []
@@ -176,7 +210,7 @@ class ProcessRunner:
             await stop_cli()
             output = "".join(lines)
             usage = {**measured_usage(output), "estimated": True}
-            return RunResult(-1, output, **usage, rate_limited=limited, timed_out=not limited)
+            return RunResult(-1, output, **usage, **reported_models(output), rate_limited=limited, timed_out=not limited)
         except (asyncio.CancelledError, Exception):
             await stop_cli()
             raise
@@ -199,7 +233,7 @@ class ProcessRunner:
             limited = True
         usage = measured_usage(output)
         return RunResult(
-            process.returncode or 0, output, **usage, rate_limited=limited,
+            process.returncode or 0, output, **usage, **reported_models(output), rate_limited=limited,
             session_id=confirmed or session_id,
         )
 

@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import mimetypes
 import secrets
 import shutil
@@ -11,6 +12,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
+import httpx
+
 from fastapi import Depends, FastAPI, File, Header, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, PlainTextResponse, StreamingResponse
@@ -19,10 +22,19 @@ from fastapi.staticfiles import StaticFiles
 from .config import ROOT, settings
 from .database import branch_name, connect, decode_agent, decode_task, dumps, init_db, now, token_summary, transaction
 from .dispatcher import dispatcher, limits, paused_artifacts, task_dir
+from .documentation_usage import documentation_usage
 from .events import bus
+from . import pricing
 from .schemas import AgentCreate, AgentUpdate, IntegrationSettings, ManualMerge, TaskCreate, TaskUpdate, TrackerAnswer
 from .tracker import BOT_PREFIXES, YougileError, ensure_webhook, fetch_chat_message, fetch_import_tasks, integration_settings, sync_yougile_moves_forever, test_connection
 from .worker_hub import hub
+
+
+async def load_initial_prices() -> None:
+    try:
+        await asyncio.to_thread(pricing.refresh, initial=True)
+    except (httpx.HTTPError, ValueError):
+        logging.getLogger(__name__).warning("Не удалось загрузить каталог тарифов моделей", exc_info=True)
 
 
 @asynccontextmanager
@@ -30,13 +42,15 @@ async def lifespan(app: FastAPI):
     init_db()
     dispatcher.recover()
     sync = asyncio.create_task(sync_yougile_moves_forever())
+    prices = asyncio.create_task(load_initial_prices())
     try:
         yield
     finally:
         for task in list(dispatcher.pending):
             task.cancel()
         sync.cancel()
-        await asyncio.gather(sync, return_exceptions=True)
+        prices.cancel()
+        await asyncio.gather(sync, prices, return_exceptions=True)
 
 
 app = FastAPI(title="Meku Agent Ops", version="1.0.0", lifespan=lifespan)
@@ -198,14 +212,19 @@ async def create_task(data: TaskCreate) -> dict[str, Any]:
 
 @app.get("/api/tasks/{task_id}")
 def task_detail(task_id: int) -> dict[str, Any]:
-    task = get_task(task_id)
     default_budget = limits()["task_token_budget"]
     with connect() as conn:
+        conn.execute("BEGIN")
+        row = conn.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+        if not row:
+            raise HTTPException(404, "Задача не найдена")
+        task = decode_task(row)
         result = task_view(task, conn, default_budget)
         result["runs"] = [dict(row) for row in conn.execute("SELECT * FROM stage_runs WHERE task_id=? ORDER BY id", (task_id,))]
         for run in result["runs"]:
             if run["tokens_estimated"]:
                 run.update(input_tokens=0, output_tokens=0, cache_tokens=0, usage_partial=True)
+        result["documentation_usage"] = documentation_usage(conn, task, result["runs"])
 
     return result
 
@@ -344,6 +363,21 @@ async def logs(task_id: int, request: Request) -> StreamingResponse:
                     yield ": keepalive\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@app.get("/api/model-prices")
+def model_prices() -> dict[str, Any]:
+    with connect() as conn:
+        conn.execute("BEGIN")
+        return pricing.status(conn)
+
+
+@app.post("/api/model-prices/refresh")
+def refresh_model_prices() -> dict[str, Any]:
+    try:
+        return pricing.refresh()
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(502, "Не удалось обновить цены моделей") from exc
 
 
 @app.get("/api/settings")

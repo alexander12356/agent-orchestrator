@@ -519,6 +519,52 @@ def test_token_budget_parks_the_task_before_the_next_stage(client, agent, idle, 
     assert current(client, task['id'])['current_stage'] == 3
 
 
+def test_documentation_usage_links_fallback_and_revision_to_approved_document(client, agent, idle, monkeypatch):
+    primary = agent["primary_config"]
+    assert client.put(f"/api/agents/{agent['id']}", json={
+        **agent,
+        "fallback_configs": [{**primary, "model": "backup"}],
+    }).status_code == 200
+    task_id = make_task(client, agent)["id"]
+    with transaction() as conn:
+        conn.executemany("INSERT INTO model_prices VALUES (?, ?, ?, ?, ?)", [
+            ("test", 0.000002, 0.000001, 0.000003, 0.000004),
+            ("backup", 0.000001, 0.0000005, None, 0.000002),
+        ])
+    rejection = {
+        "status": "REJECTED", "comments": ["Missing scenario"],
+        "revision_context": [{"acceptance_criterion": "Cover scenario", "sections": ["Сценарии"], "source_paths": []}],
+    }
+    fake_runner(monkeypatch, [
+        RunResult(1, "Interrupted", input_tokens=10, estimated=True),
+        writes("01_tech_doc_v1.md", "# Doc", input_tokens=20, cache_tokens=20, output_tokens=10),
+        writes("02_doc_review_v1.json", json.dumps(rejection)),
+        writes("01_tech_doc_v2.md", "# Revised", input_tokens=30, cache_write_tokens=10, output_tokens=10),
+        writes("02_doc_review_v2.json", APPROVED),
+        writes("04_code_review_v1.json", APPROVED),
+    ])
+    for stage in (1, 2, 1, 2):
+        asyncio.run(dispatcher.run_stage(task_id, stage))
+    (task_dir(task_id) / "03_impl_report_v1.md").write_text("# Report", encoding="utf-8")
+    asyncio.run(dispatcher.run_stage(task_id, 4))
+
+    detail = current(client, task_id)
+    usage = detail["documentation_usage"]
+    assert detail["doc_returns"] == 0
+    assert usage["doc_returns"] == 1
+    assert usage["accepted_document"] == "01_tech_doc_v2.md"
+    assert usage["accepted_attempt"] == 2
+    primary_launch, fallback = usage["attempts"][0]["launches"]
+    revision, = usage["attempts"][1]["launches"]
+    assert (primary_launch["kind"], primary_launch["model"], primary_launch["usage_partial"]) == ("draft", "test", 1)
+    assert (fallback["model"], fallback["is_fallback"], fallback["cache_tokens"]) == ("backup", 1, 20)
+    assert revision["kind"] == "revision"
+    assert revision["cost_usd"] == pytest.approx(0.00011)
+    assert usage["cost_usd"] == pytest.approx(0.00018)
+    assert usage["cost_partial"] is True
+    assert usage["implementation_reviews"][0]["notes"] == ["Переименовать поле"]
+
+
 def test_task_budget_overrides_the_shared_one(client, agent, idle):
     save_limits(client, task_token_budget=100)
     task = make_task(client, agent)

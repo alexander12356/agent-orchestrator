@@ -20,6 +20,7 @@ def client(tmp_path, monkeypatch):
         pass
 
     monkeypatch.setattr("app.main.sync_yougile_moves_forever", disable_yougile_background_sync)
+    monkeypatch.setattr("app.main.load_initial_prices", disable_yougile_background_sync)
     settings.storage_dir = tmp_path / "storage"
     settings.database_path = settings.storage_dir / "test.db"
     settings.auto_start = False

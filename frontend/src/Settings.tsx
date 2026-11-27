@@ -1,8 +1,8 @@
-import { Bot, GripVertical, Link2, Plus, Save, Settings2, ShieldCheck, Trash2, Upload } from 'lucide-react';
+import { Bot, GripVertical, Link2, Plus, RefreshCw, Save, Settings2, ShieldCheck, Trash2, Upload } from 'lucide-react';
 import { FormEvent, useEffect, useState } from 'react';
 import { api } from './api';
 import { Avatar, Modal } from './components';
-import { Agent, ModelConfig, Settings as SettingsType } from './types';
+import { Agent, ModelConfig, ModelPrices, Settings as SettingsType } from './types';
 
 const emptyConfig: ModelConfig = { cli: 'custom', model: '', reasoning_effort: '', environment: 'server', command: '' };
 const emptyAgent: Omit<Agent, 'id'> = { name: '', avatar_url: '🤖', role_prompt: '', concurrency_limit: 1, primary_config: emptyConfig, fallback_configs: [], fallback_triggers: { rate_limit: true, exit_code: true, timeout: true, timeout_minutes: 20 } };
@@ -11,7 +11,25 @@ export default function Settings({ agents, reload, notify }: { agents: Agent[]; 
   const [editing, setEditing] = useState<Agent | 'new' | null>(null);
   const [settings, setSettings] = useState<SettingsType | null>(null);
   const [integrationState, setIntegrationState] = useState<{ busy: boolean; error: string }>({ busy: false, error: '' });
+  const [prices, setPrices] = useState<ModelPrices | null>(null);
+  const [pricingState, setPricingState] = useState({ busy: false, error: '' });
   useEffect(() => { api<SettingsType>('/settings').then(setSettings); }, []);
+  useEffect(() => {
+    api<ModelPrices>('/model-prices').then(setPrices).catch(error => {
+      setPricingState({ busy: false, error: (error as Error).message });
+    });
+  }, []);
+  const refreshPrices = async () => {
+    setPricingState({ busy: true, error: '' });
+    try {
+      setPrices(await api<ModelPrices>('/model-prices/refresh', { method: 'POST' }));
+      setPricingState({ busy: false, error: '' });
+      notify('Цены моделей обновлены');
+      reload();
+    } catch (error) {
+      setPricingState({ busy: false, error: (error as Error).message });
+    }
+  };
   const persistSettings = async () => {
     if (!settings) return;
     await api('/settings', { method: 'PUT', body: JSON.stringify(settings) });
@@ -44,6 +62,20 @@ export default function Settings({ agents, reload, notify }: { agents: Agent[]; 
     <div><h1 className="text-2xl font-semibold">Настройка ботов и интеграций</h1><p className="mt-1 text-sm text-slate-500">Модели, очереди и подключения к внешним системам</p></div>
     <section><div className="mb-4 flex items-center justify-between"><h2 className="flex items-center gap-2 text-sm font-medium"><Bot size={17} className="text-indigo-400"/>Профили ботов</h2><button className="btn" onClick={() => setEditing('new')}><Plus size={15}/>Добавить бота</button></div>
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">{agents.map(agent => <button key={agent.id} onClick={() => setEditing(agent)} className="card p-5 text-left transition hover:-translate-y-0.5 hover:border-indigo-500/50"><div className="flex items-center gap-3"><Avatar agent={agent} size={42}/><div><h3 className="text-sm font-medium">{agent.name}</h3><span className="text-[10px] text-slate-500">Лимит: {agent.concurrency_limit} параллельно</span></div></div><p className="mt-4 line-clamp-2 h-8 text-[11px] text-slate-500">{agent.role_prompt || 'Системный промпт не задан'}</p><div className="mt-4 flex items-center justify-between border-t border-slate-800 pt-3 text-[10px]"><span className="text-indigo-300">{agent.primary_config.cli} · {agent.primary_config.model || 'модель по умолчанию'}{agent.primary_config.reasoning_effort ? ` · ${agent.primary_config.reasoning_effort}` : ''}</span><span className="text-slate-600">{agent.primary_config.environment === 'server' ? 'VDS' : 'Unity Worker'}</span></div></button>)}</div>
+    </section>
+    <section className="card p-6">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-sm font-medium">Цены моделей</h2>
+          <p className="mt-1 text-xs text-slate-400" aria-live="polite">{prices?.updated_at
+            ? `${prices.model_count.toLocaleString('ru-RU')} тарифов · ${new Date(prices.updated_at).toLocaleString('ru-RU')}`
+            : prices ? 'Каталог пока не загружен' : 'Проверяем каталог…'}</p>
+        </div>
+        <button type="button" className="btn" disabled={pricingState.busy} onClick={refreshPrices}>
+          <RefreshCw size={14}/>{pricingState.busy ? 'Обновляем цены…' : 'Обновить цены'}
+        </button>
+      </div>
+      {pricingState.error && <p role="alert" className="mt-2 text-xs text-rose-400">{pricingState.error}</p>}
     </section>
     {settings && <form onSubmit={saveSettings} className="card p-6"><div className="mb-5 flex items-center justify-between"><h2 className="flex items-center gap-2 text-sm font-medium"><Link2 size={17} className="text-indigo-400"/>Интеграции и Webhooks</h2><button className="btn btn-primary"><Save size={14}/>Сохранить</button></div>
       <div className="rounded-lg border border-slate-800 p-4">

@@ -89,6 +89,29 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS documentation_launches (
+    id INTEGER PRIMARY KEY,
+    run_id INTEGER NOT NULL REFERENCES stage_runs(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,
+    cli TEXT NOT NULL,
+    model TEXT,
+    is_fallback INTEGER NOT NULL,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    usage_partial INTEGER NOT NULL DEFAULT 1,
+    model_mixed INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'running'
+);
+CREATE INDEX IF NOT EXISTS idx_documentation_launches_run ON documentation_launches(run_id);
+CREATE TABLE IF NOT EXISTS model_prices (
+    model TEXT PRIMARY KEY,
+    input_rate REAL NOT NULL,
+    cache_rate REAL,
+    cache_write_rate REAL,
+    output_rate REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS yougile_moves (
     task_id INTEGER PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
     issue_id TEXT NOT NULL,
@@ -181,6 +204,8 @@ def init_db() -> None:
             ("code_returns", "INTEGER NOT NULL DEFAULT 0"),
             ("hold_reason", "TEXT"),
             ("token_budget", "INTEGER"),
+            ("accepted_document", "TEXT"),
+            ("document_accepted_at", "TEXT"),
         ):
             if column not in columns:
                 conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} {definition}")
@@ -249,7 +274,11 @@ def decode_task(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
 def restore_usage(conn):
     from .runner import KIMI_HOME
 
-    conn.execute("UPDATE stage_runs SET usage_partial=1 WHERE tokens_estimated OR is_fallback OR status!='completed'")
+    legacy = "NOT EXISTS (SELECT 1 FROM documentation_launches WHERE run_id=stage_runs.id)"
+    conn.execute(f"UPDATE stage_runs SET usage_partial=1 WHERE ({legacy}) AND (tokens_estimated OR is_fallback OR status!='completed')")
+    conn.execute(
+        "UPDATE documentation_launches SET status='interrupted', usage_partial=1 WHERE status='running'"
+    )
     kimi_sessions = {}
     for base in {KIMI_HOME, Path.home() / ".kimi-code"}:
         for state in (base / "sessions").glob("*/session_*/state.json"):
@@ -259,7 +288,11 @@ def restore_usage(conn):
                 kimi_sessions.setdefault(meta["cwd"], []).append((created, state.parent))
             except (OSError, ValueError, KeyError, TypeError, OverflowError):
                 continue
-    for run in conn.execute("SELECT r.*, t.worktree_path FROM stage_runs r JOIN tasks t ON t.id=r.task_id WHERE tokens_estimated OR cli_used IS NULL"):
+    for run in conn.execute(
+        "SELECT r.*, t.worktree_path FROM stage_runs r JOIN tasks t ON t.id=r.task_id "
+        "WHERE (tokens_estimated OR cli_used IS NULL) "
+        "AND NOT EXISTS (SELECT 1 FROM documentation_launches WHERE run_id=r.id)"
+    ):
         if not run["finished_at"]:
             continue
         cwd = settings.storage_dir / "tasks" / str(run["task_id"])
