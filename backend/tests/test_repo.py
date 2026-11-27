@@ -106,6 +106,8 @@ def test_server_agent_receives_full_checkout_and_separate_artifact_dir(client, a
             assert (checkout / project / "Assets/Windows/IWindowSystem.cs").is_file()
             assert (checkout / "Assets/Data/Catalog.asset").read_text(encoding="utf-8") == "Capacity: 2"
             assert "grep -l -F" in prompt
+            assert "Начни с ТЗ и утверждённого техдокумента" in prompt
+            assert "постепенно расширяй область вплоть до всего Assets" in prompt
             if with_unity:
                 index_root = Path(env["UNITY_PROJECT_ROOT"])
                 assert not index_root.resolve().is_relative_to(checkout.resolve())

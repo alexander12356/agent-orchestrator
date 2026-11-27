@@ -23,6 +23,7 @@ import websockets
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from backend.app.progress import progress_prompt
 from backend.app.runner import cli_session_id, resume_command, valid_session_id
+from backend.app.search import ZCODE_SEARCH_ARGS, search_guidance
 from backend.app.usage import FIELDS, extract_usage, recent_kimi_session, recent_kimi_usage, zcode_usage
 
 RATE_LIMIT_RE = re.compile(r"rate.?limit|usage.?limit|quota exceeded|\b429\b|try again later", re.I)
@@ -340,7 +341,7 @@ class UnityWorker:
         elif cli == "kimi":
             return kimi_command(config, prompt)
         elif cli == "zcode":
-            return zcode_command(prompt)
+            return [*zcode_command(prompt), *ZCODE_SEARCH_ARGS]
         elif cli == "gemini":
             args = ["gemini", "-p", prompt]
         elif cli == "aider":
@@ -709,6 +710,7 @@ class UnityWorker:
             if description:
                 prompt += f"Исходное описание задачи:\n{description}\n"
             prompt += f"Реализуй задачу по {docs}.\n"
+            prompt += search_guidance() + "\n"
             if review:
                 prompt += f"Замечания прошлого ревью (comments — блокеры, исправить обязательно; notes — учесть):\n{review}\n"
             prompt += (

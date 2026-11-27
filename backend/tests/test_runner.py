@@ -56,6 +56,8 @@ def test_zcode_runs_a_headless_yolo_prompt(monkeypatch):
     command = build_command({'cli': 'zcode', 'model': 'ignored/model'}, 'review the doc', Path('/tmp/7'), 2)
     assert command == ['zcode', '--model', 'ignored/model', '-p', 'review the doc', '--mode', 'yolo', '--no-color']
     assert cli_environment({'cli': 'zcode'})['NO_COLOR'] == '1'
+    checkout_command = build_command({'cli': 'zcode'}, 'review the doc', Path('/tmp/7'), 2, Path('/checkout'))
+    assert checkout_command[-2:] == ['--disallowed-tools', 'Glob,Grep']
 
 
 def test_zcode_without_model_uses_the_saved_default(monkeypatch):

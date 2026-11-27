@@ -15,6 +15,7 @@ from .events import bus
 from .repo import UNITY_PROJECT_DIRS, RepoError, prepare_checkout, repository_url, unity_project_root
 from .runner import ProcessRunner, RunResult, resumable_cli, signal_cli
 from .schemas import IntegrationSettings
+from .search import search_guidance
 from .telegram import notify_decision
 from .tracker import find_reply, integration_settings, publish_questions
 from .worker_hub import hub
@@ -426,13 +427,7 @@ class Dispatcher:
             )
             if stage in CHECKOUT_GUIDANCE:
                 inputs.append(
-                    "Для точечного поиска используй rg с ограничением по расширению или каталогу, "
-                    "например rg -n -g '*.cs' 'ИмяСимвола' <путь-checkout>. "
-                    "Если rg недоступен, выполни git -C <путь-checkout> grep -n 'ИмяСимвола' -- '*.cs'.\n"
-                    "Для поиска привязки Unity-компонента прочитай GUID из .cs.meta, затем найди пути командой "
-                    "git -C <путь-checkout> grep -l -F '<GUID>' -- '*.prefab' '*.unity' '*.asset'. "
-                    "Открой нужный фрагмент и проверь объект и поле ссылки.\n"
-                    + CHECKOUT_GUIDANCE[stage]
+                    search_guidance() + "\n" + CHECKOUT_GUIDANCE[stage]
                 )
                 if unity_root is not None:
                     inputs.append(
@@ -440,12 +435,12 @@ class Dispatcher:
                         "Для навигации по C# доступен akiojin/unity-cli в локальном режиме. "
                         "UNITY_PROJECT_ROOT указывает на временный каталог для индекса со ссылками на исходники. "
                         "Пути из вывода читай относительно корня проекта в checkout.\n"
-                        "Перед первым поиском символов в попытке выполни "
+                        "Когда нужны определения или ссылки C#, сначала подготовь индекс командой "
                         "unity-cli tool call build_index --json '{}' --output json.\n"
                         "unity-cli tool call find_symbol --json '{\"name\":\"ИмяКласса\",\"exact\":true}' --output json\n"
                         "unity-cli tool call find_refs --json '{\"name\":\"ИмяМетода\",\"pageSize\":10}' --output json\n"
                         "Проверь найденные места по исходникам: локальный индекс может вернуть одноимённые символы. "
-                        "При ошибке продолжи через rg или git grep. Для проверки, требующей Editor, укажи действие для Unity Worker."
+                        "При ошибке продолжи через ограниченный поиск выше. Для проверки, требующей Editor, укажи действие для Unity Worker."
                     )
         inputs.append(
             "Используй указанные артефакты. Отметь недостающие сведения. "
@@ -849,7 +844,8 @@ class Dispatcher:
                         f"Внеси точечные правки в актуальную рабочую копию: {draft}. "
                         f"Запиши JSON с новыми вопросами в {draft_questions}. "
                         'Если вопросов нет, запиши {"has_questions": false, "questions": []}. '
-                        "Используй эти пути для вывода и текущие переменные окружения для локального checkout."
+                        "Используй эти пути для вывода и текущие переменные окружения для локального checkout.\n"
+                        + (search_guidance() if checkout else "")
                     )
                 result = await runner.run(
                     config, cli_prompt, directory, env, agent["fallback_triggers"].get("timeout_minutes", 20),

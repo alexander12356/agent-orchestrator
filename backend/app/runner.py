@@ -13,6 +13,7 @@ from typing import Any, Awaitable, Callable
 
 from .live_logs import TOOL_PROGRESS_PROMPT, live_log_messages
 from .progress import progress_prompt
+from .search import ZCODE_SEARCH_ARGS
 from .usage import extract_usage, normalize, objects, recent_kimi_session, recent_zcode_session, zcode_usage
 
 RATE_LIMIT_RE = re.compile(r"rate.?limit|usage.?limit|quota exceeded|\b429\b|try again later", re.I)
@@ -272,6 +273,8 @@ def build_command(config: dict[str, Any], prompt: str, cwd: Path, stage: int = 0
         # zcode-app-cli accepts an explicit provider/model id per run; agents
         # that leave the model empty fall back to the saved ZCode default.
         args = [zcode_program(), "-p", prompt, "--mode", "yolo", "--no-color"]
+        if repo is not None:
+            args.extend(ZCODE_SEARCH_ARGS)
         if model:
             args[1:1] = ["--model", model]
         return _with_live_output(args)
