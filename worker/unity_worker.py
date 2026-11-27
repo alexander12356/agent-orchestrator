@@ -737,14 +737,17 @@ class UnityWorker:
             details = read_pr_details(details_path)
             docs.unlink(missing_ok=True)
             details_path.unlink(missing_ok=True)
+            issue_key = str(message.get("external_issue_key") or "").strip()
+            issue_url = str(message.get("external_issue_url") or "").strip()
             if (await self.checked(["git", "status", "--porcelain"], path)).strip():
+                subject = f"feat: implement task {task_id}"
+                if issue_key or issue_url:
+                    description = " ".join(details["purpose"].split())
+                    subject = " ".join(filter(None, (issue_key, issue_url, description)))
                 await self.checked(["git", "add", "-A"], path)
-                await self.checked(["git", "commit", "-m", f"feat: implement task {task_id}"], path)
+                await self.checked(["git", "commit", "-m", subject], path)
             stat = await self.checked(["git", "diff", "--stat", "origin/main...HEAD"], path)
-            pr_body = format_pr_body(
-                details, task_id, unity_status, stat,
-                str(message.get("external_issue_key") or ""), str(message.get("external_issue_url") or ""),
-            )
+            pr_body = format_pr_body(details, task_id, unity_status, stat, issue_key, issue_url)
             usage = {key: result[key] for key in (*FIELDS, "estimated", "usage_partial") if key in result}
             usage.update(cli_used=selected.get("cli"), model_used=selected.get("model", ""),
                          is_fallback=selected != config["primary"])

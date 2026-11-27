@@ -596,6 +596,11 @@ def test_assign_creates_pr_from_summary_and_keeps_service_files_out_of_commit(tm
         assert len(prompts) == 1
         assert not list(worker.worktrees.glob('*.json'))
 
+    commits = [command for command in commands if command[:2] == ['git', 'commit']]
+    assert commits == [[
+        'git', 'commit', '-m',
+        'ZEL-42 https://tracker.example/ZEL-42 Сохранять прогресс после перезапуска игры.',
+    ]]
     create = next(command for command in commands if command[:3] == ['gh', 'pr', 'create'])
     assert create[create.index('--title') + 1] == 'Сохранение прогресса'
     assert '## Что сделано' in body
