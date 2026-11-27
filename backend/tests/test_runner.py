@@ -144,13 +144,23 @@ def test_live_log_publishes_agent_updates_before_the_cli_exits(monkeypatch, tmp_
     assert not list(tmp_path.glob(".orchestrator-progress-*"))
 
 
-def test_cursor_progress_is_published_once_before_cli_exit(monkeypatch, tmp_path):
-    public = "Прогресс: Проверяю исходники."
+def test_cursor_tool_events_are_published_once_before_cli_exit(monkeypatch, tmp_path):
+    public = "Прогресс: Нужен доступ к исходникам."
     assistant = {
         "type": "assistant",
         "message": {"role": "assistant", "content": [{"type": "text", "text": public}]},
     }
+    calls = [
+        {"readToolCall": {"args": {"path": "src/input.txt"}}},
+        {"writeToolCall": {"args": {"path": "out.md", "fileText": "Прогресс: Содержимое файла"}}},
+        {"editToolCall": {"args": {"path": "out.md", "streamContent": "Новый текст"}}},
+        {"todoWriteToolCall": {"args": {"todos": ["plan"]}}},
+    ]
     events = [
+        *(
+            {"type": "tool_call", "subtype": subtype, "tool_call": call}
+            for call in calls for subtype in ("started", "completed")
+        ),
         {"type": "thinking", "text": "Прогресс: Скрытый текст"},
         {"type": "tool_call", "tool_call": {"result": "Прогресс: Содержимое файла"}},
         {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "Итог."}]}},
@@ -185,10 +195,47 @@ def test_cursor_progress_is_published_once_before_cli_exit(monkeypatch, tmp_path
     result = asyncio.run(runner.run({"cli": "custom", "command": "agent --print {prompt}"}, "prompt", tmp_path, {}, 1))
 
     assert result.exit_code == 0
-    assert logged == ["Проверяю исходники.\n"]
+    assert logged == [
+        "Читаю: src/input.txt\n", "Записываю: out.md\n", "Изменяю: out.md\n",
+        "Нужен доступ к исходникам.\n",
+    ]
     assert (result.input_tokens, result.output_tokens) == (10, 2)
     assert "Прогресс:" in prompts[0]
+    assert "Используй TodoList по необходимости" in prompts[0]
+    assert "Перед первым инструментом" not in prompts[0]
     assert "updates.txt" not in prompts[0]
+
+
+@pytest.mark.parametrize("cli", ["kimi", "zcode"])
+def test_neo_fallback_uses_no_progress_file(monkeypatch, tmp_path, cli):
+    calls = [
+        {"type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
+        for name, args in [
+            ("Read", {"path": "src/file.cs"}),
+            ("Edit", {"path": "doc.md", "content": "Содержимое правки"}),
+            ("TodoList", {"todos": []}),
+        ]
+    ]
+    events = [
+        {"role": "assistant", "tool_calls": calls},
+        {"role": "tool", "content": "Прогресс: Содержимое файла"},
+        {"role": "assistant", "content": "Прогресс: Решение согласовано."},
+    ] if cli == "kimi" else []
+    script = "\n".join(f"print({json.dumps(event)!r})" for event in events)
+    monkeypatch.setattr("app.runner.build_command", lambda *args: [sys.executable, "-c", script])
+    logged, prompts = [], []
+
+    async def log(text):
+        logged.append(text)
+
+    runner = ProcessRunner(log_callback=log, on_prompt_sent=prompts.append, tool_event_logs=True)
+    result = asyncio.run(runner.run({"cli": cli}, "prompt", tmp_path, {}, 1))
+    assert result.exit_code == 0
+    assert "updates.txt" not in prompts[0]
+    assert not list(tmp_path.glob(".orchestrator-progress-*"))
+    assert logged == ([
+        "Читаю: src/file.cs\n", "Изменяю: doc.md\n", "Решение согласовано.\n",
+    ] if cli == "kimi" else [])
 
 
 def test_extract_cursor_usage_names():

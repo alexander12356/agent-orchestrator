@@ -738,6 +738,7 @@ class Dispatcher:
                 if index and not resumed:
                     await log(f"Fallback: {config['cli']} {config.get('model', '')}\n")
                 runner = ProcessRunner(log_callback=log, on_process=register_process, on_prompt_sent=record_prompt)
+                runner.tool_event_logs = agent["name"] == "Neo"
                 runner.tracked_cli, fingerprint = tracked.get(index, (None, None))
                 resumes = continuation["resumes"] + int(not from_pause) if resumed else 0
 
