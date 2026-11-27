@@ -114,6 +114,26 @@ def windows_path(path: Path) -> str:
     return str(path)
 
 
+def make_gitfile_portable(path: Path) -> None:
+    drive = PureWindowsPath(windows_path(path)).drive
+    gitfile = path / ".git"
+    if os.name == "nt" or not drive or not gitfile.is_file():
+        return
+    prefix, _, location = gitfile.read_text(encoding="utf-8").strip().partition(": ")
+    git_dir = Path(location)
+    if prefix != "gitdir" or not git_dir.is_absolute() or PureWindowsPath(windows_path(git_dir)).drive != drive:
+        return
+    # Windows Git reads this link while WSL Git still manages the worktree via its backlink.
+    relative = Path(os.path.relpath(git_dir, path)).as_posix()
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path, delete=False) as temp:
+        temp_path = Path(temp.name)
+    try:
+        temp_path.write_text(f"gitdir: {relative}\n", encoding="utf-8")
+        temp_path.replace(gitfile)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
 def rate_limited_line(text: str) -> bool:
     """Whether an output line reports a spent subscription limit.
 
@@ -254,6 +274,7 @@ class UnityWorker:
             root, _, ref = checkout.strip().partition("\n")
             if code or ref != f"refs/heads/{branch}" or Path(root.rstrip("\r")).resolve() != path:
                 raise RuntimeError(f"Каталог {path} не является рабочей копией ветки {branch}. Файлы сохранены.")
+        make_gitfile_portable(path)
         await self.prepare_library(path)
         return path
 

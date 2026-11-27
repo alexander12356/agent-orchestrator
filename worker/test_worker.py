@@ -171,6 +171,28 @@ def test_incomplete_worktree_preserves_files_and_fails_before_preparing_library(
     assert not (path / 'Library').exists()
 
 
+@pytest.mark.skipif(sys.platform == 'win32', reason='Exercises the WSL Git pointer')
+def test_portable_worktree_gitfile_preserves_git_discovery_and_registration(tmp_path, monkeypatch):
+    repo = tmp_path / 'repo'
+    repo.mkdir()
+    path = tmp_path / 'worktrees' / 'task-1'
+
+    def git(cwd, *args):
+        return subprocess.check_output(['git', *args], cwd=cwd, text=True, stderr=subprocess.STDOUT).strip()
+
+    git(repo, 'init', '-b', 'main')
+    git(repo, '-c', 'user.name=Test', '-c', 'user.email=test@example.com', 'commit', '--allow-empty', '-m', 'initial')
+    git(repo, 'worktree', 'add', '-b', 'feat/task-1', str(path))
+    monkeypatch.setattr(module, 'windows_path', lambda local: 'D:/' + local.relative_to(tmp_path).as_posix())
+
+    module.make_gitfile_portable(path)
+    module.make_gitfile_portable(path)
+
+    assert (path / '.git').read_text(encoding='utf-8').strip() == 'gitdir: ../../repo/.git/worktrees/task-1'
+    assert git(path, 'symbolic-ref', '--short', 'HEAD') == 'feat/task-1'
+    assert f'worktree {path}' in git(repo, 'worktree', 'list', '--porcelain')
+
+
 def test_worktree_is_created_on_issue_key_branch(tmp_path):
     worker = make_worker(tmp_path)
     commands = []
